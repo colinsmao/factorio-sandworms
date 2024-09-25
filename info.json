@@ -1,0 +1,10 @@
+{
+  "name":"sandworms",
+  "author":"kelianmao",
+  "version":"0.1.0",
+  "title":"Sandworms",
+  "homepage":"",
+  "description":"Adds sandworms.",
+  "dependencies": ["base"],
+  "factorio_version": "1.1"
+}
