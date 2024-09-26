@@ -14,6 +14,40 @@ table.insert(collision_mask, collision_mask_util.get_first_unused_layer())
 data.raw["cliff"]["cliff"].collision_mask = collision_mask
 worm_head.collision_mask = collision_mask
 worm_head.is_military_target = true  -- will be targeted by turrets
+worm_head.resistances =
+{
+  {
+    type = "fire",
+    decrease = 15,
+    percent = 60
+  },
+  {
+    type = "physical",
+    percent = 160
+  },
+  {
+    type = "impact",
+    decrease = 50,
+    percent = 80
+  },
+  {
+    type = "explosion",
+    percent = -1000
+  },
+  {
+    type = "acid",
+    decrease = 0,
+    percent = 70
+  }
+}
+-- worm_head.damaged_trigger_effect = {
+--   type = "script",
+--   effect_id = "worm-damaged"
+-- }
+-- worm_head.crash_trigger = {
+--   type = "script",
+--   effect_id = "worm-crashed"
+-- }
 
 worm_segment = table.deepcopy(worm_head)
 worm_segment.name = "worm-segment"

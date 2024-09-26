@@ -1,5 +1,42 @@
 core_util = require("__core__/lualib/util.lua") -- adds table.deepcopy
 
+local Util = {}
+
+--- Return the squared distance between two positions
+---@param pos0 MapPosition
+---@param pos1 MapPosition
+function Util.dist2(pos0, pos1)
+  return (pos0.x - pos1.x)^2 + (pos0.y - pos1.y)^2
+end
+
+--- Return the distance between two positions
+---@param pos0 MapPosition
+---@param pos1 MapPosition
+function Util.dist(pos0, pos1)
+  return math.sqrt(Util.dist2(pos0, pos1))
+end
+
+--- Return the orientation of a vector
+---@param vector {x: number, y: number}
+---@return number orientation
+function Util.vector_to_orientation(vector)
+  local orientation = math.atan2(vector.y, vector.x)/(2 * math.pi) + 0.25  -- atan2 [-0.5, 0.5) -> [-0.25, 0.75)
+  if orientation < 0 then ori = orientation + 1 end  -- [0, 1)
+  return orientation
+end
+
+--- Return the difference of two orientations, in range [-0.5, 0.5)
+---@param target number
+---@param origin number
+---@return number delta
+function Util.delta_orientation(target, origin)
+  local delta = target - origin  -- (-1, 1)
+  if delta < -0.5 then delta = delta + 1 end  -- [-0.5, 1)
+  if delta >= 0.5 then delta = delta - 1 end  -- [-0.5, 0.5)
+  return delta
+end
+
+
 script.on_init(function()
   global.worms = global.worms or {}  -- map worm_id: worm
   global.pathfinder_requests = global.pathfinder_requests or {}  -- pathfinder_id: worm_id
@@ -12,17 +49,61 @@ end)
 
 
 local Worm = {}
-Worm.WORM_LENGTH = 10  -- target worm length in tiles
-Worm.SEGMENT_SEP = 2  -- separation in tiles between segments
-Worm.HEAD_UPDATE_FREQ = 10  -- ticks
-Worm.SEGMENT_UPDATE_FREQ = 5  -- ticks
+Worm.WORM_LENGTH = 10  -- length of worm in segments (not counting head)
+Worm.SEGMENT_SEP = 2  -- tiles; separation between segments
+Worm.HEAD_UPDATE_FREQ = 10  -- ticks; update frequency for worm heads, which have pathfinding AI and stuff
+Worm.SEGMENT_UPDATE_FREQ = 5  -- ticks; update frequency for worm segments, which are dumb but more numerous
+if Worm.HEAD_UPDATE_FREQ == Worm.SEGMENT_UPDATE_FREQ then
+  error("Cannot register two functions to the same nth tick.")
+end
 Worm.MIN_SPEED = 3/60  -- tiles per tick; will die/burrow if below this speed (otherwise animations break)
 Worm.MAX_SPEED = 60/60  -- tiles per tick; otherwise animations break
 Worm.TARGET_SPEED = 10/60  -- tiles per tick; will accelerate up to this speed, but will not decelerate if above
 Worm.PATHFINDER_COOLDOWN = 1  -- ticks; cooldown between pathfinder requests
-Worm.TURN_RADIUS = Worm.TARGET_SPEED / (2 * math.pi * 0.0035)  -- TODO read rotation_speed
-if Worm.HEAD_UPDATE_FREQ == Worm.SEGMENT_UPDATE_FREQ then
-  error("Cannot register two functions to the same nth tick.")
+Worm.TURN_RADIUS = Worm.TARGET_SPEED / (2 * math.pi * 0.0035)  -- tiles; TODO read rotation_speed from prototype
+Worm.CHARGE_RADIUS = 3 * Worm.TURN_RADIUS  -- tiles; distance within the worm just charges straight at the target
+
+Worm.worm_template = {
+  id = nil,  -- head.unit_number
+  head = nil,  -- "worm-head" entity
+  segments = {},  -- array["worm-segment"]
+  prev_tick = 0,  -- previous segment tick
+  mode = "idle",  -- mode {"idle", "direct_position", "direct_entity", "path"}, default "idle"
+  target = nil,  -- target position or entity for direct mode, index within path for path mode
+  path = nil,  -- array[PathfinderWaypoint] for path mode
+}
+
+--- Init a worm object from a worm-head entity
+---@param head LuaEntity
+---@return table worm
+function Worm.init(head)  -- assumes head is valid
+  local worm = table.deepcopy(Worm.worm_template)
+  worm.id = head.unit_number
+  worm.head = head
+  global.worms[worm.id] = worm
+  return worm
+end
+
+--- Create body (list of segments) for a worm
+function Worm.create_body(worm)
+  local orientation = worm.head.orientation  -- [0, 1) clockwise, north=0
+  local displacement = {x=math.sin(2*math.pi*orientation), y=-math.cos(2*math.pi*orientation)}
+  local position = worm.head.position
+  local before = worm.head
+  for i=1,Worm.WORM_LENGTH do
+    local segment = worm.head.surface.create_entity{
+      name = "worm-segment",
+      position = {position.x - i * Worm.SEGMENT_SEP * displacement.x, position.y - i * Worm.SEGMENT_SEP * displacement.y},
+      force = worm.head.force
+    }
+    segment.orientation = orientation  -- not an argument for create_entity
+    segment.color = {r=0.0, g=0.5, b=0.0}
+    table.insert(worm.segments, {
+      entity = segment,
+      before = before,
+    })
+    before = segment
+  end
 end
 
 
@@ -37,39 +118,9 @@ function Worm.on_entity_created(event)
   if not entity then return end
   if entity.name ~= "worm-head" then return end  -- only head defines the worm
 
-  local worm = {
-    id = entity.unit_number,
-    head = entity,
-    segments = {},  -- queue
-    min_segment = 0,  -- for queue
-    max_segment = 0,  -- for queue
-    prev_tick = 0,  -- previous segment tick
-    mode = "idle",  -- mode {"idle", "direct_position", "direct_entity", "path"}, default "idle"
-    target = nil,  -- target position or entity for direct mode, index within path for path mode
-    path = nil,  -- array[PathfinderWaypoint] for path mode
-  }
-  entity.color = {r=0.5, g=0.0, b=0.0}
-
-  local orientation = entity.orientation  -- [0, 1) clockwise, north=0
-  local displacement = {x=math.sin(2*math.pi*orientation), y=-math.cos(2*math.pi*orientation)}
-  local position = entity.position
-  local before = entity
-  for i=1,8 do
-    local segment = entity.surface.create_entity{
-      name = "worm-segment",
-      position = {position.x - i * Worm.SEGMENT_SEP * displacement.x, position.y - i * Worm.SEGMENT_SEP * displacement.y},
-      force = entity.force
-    }
-    segment.orientation = orientation  -- not an argument for create_entity
-    segment.color = {r=0.0, g=0.5, b=0.0}
-    table.insert(worm.segments, {
-      entity = segment,
-      before = before,
-    })
-    before = segment
-  end
-
-  global.worms[worm.id] = worm
+  local worm = Worm.init(entity)
+  worm.head.color = {r=0.5, g=0.0, b=0.0}
+  Worm.create_body(worm)
 
 end
 -- TODO: add event entity filters
@@ -141,17 +192,7 @@ script.on_event("left-click", function(event)
   if cursor_stack == nil or not cursor_stack.valid_for_read then return end
   if cursor_stack.name == "iron-plate" then
     game.print(event.cursor_position)
-    -- refresh all annotations
-    if global.boundary_box then rendering.destroy(global.boundary_box) end
-    -- global.boundary_box = rendering.draw_rectangle{
-    --   color = {1, 0, 0},
-    --   width = 5,
-    --   filled = false,
-    --   left_top = {0, 0},
-    --   right_bottom = {BOUNDING_BOX, BOUNDING_BOX},
-    --   surface = player.surface,
-    -- }
-    update_labels(nil)
+    update_labels(nil)  -- refresh annotations
   elseif cursor_stack.name == "copper-plate" then
     -- path to click
     for _, worm in pairs(global.worms) do
@@ -163,35 +204,75 @@ script.on_event("left-click", function(event)
       worm.head.destroy{raise_destroy=true}
     end
   elseif cursor_stack.name == "plastic-bar" then
-    local ent = player.surface.create_entity{
+    local head = player.surface.create_entity{
       name = "worm-head",
       position = event.cursor_position,
       force = "enemy",
       create_build_effect_smoke = false,
-      raise_built = true,
+      raise_built = false,
     }
-    ent.orientation = math.random()
+    if not head then return end
+    local worm = Worm.init(head)
+    worm.head.orientation = math.random()
+    Worm.create_body(worm)  -- requires orientation to be set
     -- ent.speed = Worm.TARGET_SPEED
   elseif cursor_stack.name == "iron-gear-wheel" then
     -- path to player
     for _, worm in pairs(global.worms) do
-      worm.mode = "direct_entity"
-      worm.target = player
+      Worm.set_direct_entity(worm, player.character)
     end
   end
 end)
 
+--- debug destroy path segments
+function Worm.destroy_path_rendering(worm)
+  if worm.path_points then
+    for _, id in pairs(worm.path_points) do
+      rendering.destroy(id)
+    end
+  end
+  if worm.path_segments then
+    for _, id in pairs(worm.path_segments) do
+      rendering.destroy(id)
+    end
+  end
+  worm.path_points = nil
+  worm.path_segments = nil
+end
+
+-- debug draw or update direct path
+function Worm.draw_direct_path(worm, target)
+  if not worm.path_direct or not rendering.is_valid(worm.path_direct) then
+    worm.path_direct = rendering.draw_line{
+      color = {r=0,g=64,b=0,a=0.01},
+      width = 3,
+      from = worm.head,
+      to = target,
+      surface = worm.head.surface,
+    }
+  else
+    -- rendering.set_from(worm.path_direct, worm.head)
+    rendering.set_to(worm.path_direct, target)
+  end
+end
+
 --- Pathfinder request
----@param target_pos MapPosition
+---@param target_position MapPosition
 ---@param tick integer
-function Worm.get_path(worm, target_pos, tick)
+function Worm.get_path(worm, target_position, tick)
+  -- If nearby, skip pathfinding request and just go directly there
+  if Util.dist(worm.head.position, target_position) < Worm.CHARGE_RADIUS then
+    Worm.set_direct_position(worm, target_position)
+    return
+  end
+
   global.pathfinder_requests = global.pathfinder_requests or {}  -- pathfinder_id: worm_id
   if worm.pathfinder_tick and tick - worm.pathfinder_tick < Worm.PATHFINDER_COOLDOWN then return end
   worm.pathfinder_id = worm.head.surface.request_path{
     bounding_box = worm.head.bounding_box,
     collision_mask = worm.head.prototype.collision_mask,
     start = worm.head.position,
-    goal = target_pos,
+    goal = target_position,
     pathfind_flags = {
       allow_destroy_friendly_entities = true,
       cache = false,
@@ -205,22 +286,6 @@ function Worm.get_path(worm, target_pos, tick)
   }
   worm.pathfinder_tick = tick
   global.pathfinder_requests[worm.pathfinder_id] = worm.id
-end
-
---- debug
-function Worm.destroy_path_rendering(worm)
-  if worm.path_points then
-    for _, id in pairs(worm.path_points) do
-      rendering.destroy(id)
-    end
-  end
-  worm.path_points = {}
-  if worm.path_segments then
-    for _, id in pairs(worm.path_segments) do
-      rendering.destroy(id)
-    end
-  end
-  worm.path_segments = {}
 end
 
 --- Process asynchronous pathfinder response
@@ -238,20 +303,10 @@ function Worm.set_path(event)
 
   -- debug path rendering
 
-  if not worm.path_direct or not rendering.is_valid(worm.path_direct) then
-    worm.path_direct = rendering.draw_line{
-      color = {r=0,g=64,b=0,a=0.01},
-      width = 3,
-      from = worm.head,
-      to = worm.path[#worm.path].position,
-      surface = worm.head.surface,
-    }
-  else
-    -- rendering.set_from(worm.path_direct, worm.head)
-    rendering.set_to(worm.path_direct, worm.path[#worm.path].position)
-  end
-
+  Worm.draw_direct_path(worm, worm.path[#worm.path].position)
   Worm.destroy_path_rendering(worm)
+  worm.path_points = {}
+  worm.path_segments = {}
   prev_pos = worm.head.position
   for _, pathpoint in pairs(worm.path) do
     table.insert(worm.path_segments, rendering.draw_line{
@@ -264,6 +319,7 @@ function Worm.set_path(event)
     table.insert(worm.path_points, rendering.draw_circle{
       color = {r=0,g=64,b=0,a=0.01},
       radius = 0.5,
+      filled = true,
       target = pathpoint.position,
       surface = worm.head.surface,
     })
@@ -275,42 +331,24 @@ function Worm.set_path(event)
 end
 script.on_event(defines.events.on_script_path_request_finished, Worm.set_path)
 
-
-local Util = {}
-
---- Return the squared distance between two positions
----@param pos0 MapPosition
----@param pos1 MapPosition
-function Util.dist2(pos0, pos1)
-  return (pos0.x - pos1.x)^2 + (pos0.y - pos1.y)^2
+--- Set direct position target
+---@param position MapPosition
+function Worm.set_direct_position(worm, position)
+  worm.mode = "direct_position"
+  worm.target = position
+  Worm.destroy_path_rendering(worm)
+  Worm.draw_direct_path(worm, position)
 end
 
---- Return the distance between two positions
----@param pos0 MapPosition
----@param pos1 MapPosition
-function Util.dist(pos0, pos1)
-  return math.sqrt(Util.dist2(pos0, pos1))
+--- Set direct entity target
+---@param entity LuaEntity
+function Worm.set_direct_entity(worm, entity)
+  worm.mode = "direct_entity"
+  worm.target = entity
+  Worm.destroy_path_rendering(worm)
+  Worm.draw_direct_path(worm, entity)
 end
 
---- Return the orientation of a vector
----@param vector {x: number, y: number}
----@return number orientation
-function Util.vector_to_orientation(vector)
-  local orientation = math.atan2(vector.y, vector.x)/(2 * math.pi) + 0.25  -- atan2 [-0.5, 0.5) -> [-0.25, 0.75)
-  if orientation < 0 then ori = orientation + 1 end  -- [0, 1)
-  return orientation
-end
-
---- Return the difference of two orientations, in range [-0.5, 0.5)
----@param target number
----@param origin number
----@return number delta
-function Util.delta_orientation(target, origin)
-  local delta = target - origin  -- (-1, 1)
-  if delta < -0.5 then delta = delta + 1 end  -- [-0.5, 1)
-  if delta >= 0.5 then delta = delta - 1 end  -- [-0.5, 0.5)
-  return delta
-end
 
 --- Return riding_state acceleration
 ---@return defines.riding.acceleration
@@ -341,6 +379,9 @@ end
 --- Return riding_state direction
 ---@return defines.riding.direction
 function Worm.get_direction(worm)
+  if worm.head.speed < Worm.MIN_SPEED then
+    return defines.riding.direction.straight
+  end
   if worm.mode == "direct_entity" or worm.mode == "direct_position" or worm.mode == "path" then
     local target_position = Worm.get_target_position(worm)
     local disp = {
@@ -414,10 +455,9 @@ function Worm.update_head(worm)
   end
 
   if worm.mode == "path" then
-    if Util.dist(worm.head.position, worm.path[#worm.path].position) < 3 * Worm.TURN_RADIUS then
+    if Util.dist(worm.head.position, worm.path[#worm.path].position) < Worm.CHARGE_RADIUS then
       -- If almost there, switch to direct_position mode
-      worm.mode = "direct_position"
-      worm.target = worm.path[#worm.path].position
+      Worm.set_direct_position(worm, worm.path[#worm.path].position)
       Worm.destroy_path_rendering(worm)
     else
       -- Pop completed points
@@ -463,6 +503,13 @@ function Worm.update_segments(tickdata)
   end
 end
 script.on_nth_tick(Worm.SEGMENT_UPDATE_FREQ, Worm.update_segments)
+
+
+script.on_event(defines.events.on_script_trigger_effect, function(event)
+  game.print("id="..event.effect_id)
+  if event.source_entity then game.print("source="..event.source_entity.name) end
+  if event.target_entity then game.print("target="..event.target_entity.name) end
+end)
 
 
 return Worm
