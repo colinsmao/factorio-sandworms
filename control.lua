@@ -1,5 +1,3 @@
----@class MapPosition
-
 core_util = require("__core__/lualib/util.lua") -- adds table.deepcopy
 
 script.on_init(function()
@@ -175,7 +173,11 @@ script.on_event("left-click", function(event)
     ent.orientation = math.random()
     -- ent.speed = Worm.TARGET_SPEED
   elseif cursor_stack.name == "iron-gear-wheel" then
-
+    -- path to player
+    for _, worm in pairs(global.worms) do
+      worm.mode = "direct_entity"
+      worm.target = player
+    end
   end
 end)
 
@@ -193,16 +195,32 @@ function Worm.get_path(worm, target_pos, tick)
     pathfind_flags = {
       allow_destroy_friendly_entities = true,
       cache = false,
-      prefer_straight_paths = true,
+      prefer_straight_paths = false,
       low_priority = false
     },
     force = worm.head.force,
     can_open_gates = false,
     radius = 1,
-    path_resolution_modifier = -4,  -- resolution = 2^-x
+    path_resolution_modifier = -3,  -- resolution = 2^-x
   }
   worm.pathfinder_tick = tick
   global.pathfinder_requests[worm.pathfinder_id] = worm.id
+end
+
+--- debug
+function Worm.destroy_path_rendering(worm)
+  if worm.path_points then
+    for _, id in pairs(worm.path_points) do
+      rendering.destroy(id)
+    end
+  end
+  worm.path_points = {}
+  if worm.path_segments then
+    for _, id in pairs(worm.path_segments) do
+      rendering.destroy(id)
+    end
+  end
+  worm.path_segments = {}
 end
 
 --- Process asynchronous pathfinder response
@@ -233,18 +251,7 @@ function Worm.set_path(event)
     rendering.set_to(worm.path_direct, worm.path[#worm.path].position)
   end
 
-  if worm.path_points then
-    for _, id in pairs(worm.path_points) do
-      rendering.destroy(id)
-    end
-  end
-  worm.path_points = {}
-  if worm.path_segments then
-    for _, id in pairs(worm.path_segments) do
-      rendering.destroy(id)
-    end
-  end
-  worm.path_segments = {}
+  Worm.destroy_path_rendering(worm)
   prev_pos = worm.head.position
   for _, pathpoint in pairs(worm.path) do
     table.insert(worm.path_segments, rendering.draw_line{
@@ -355,11 +362,20 @@ end
 
 --- Pop completed points from a path
 function Worm.pop_path(worm)
-  -- Since it takes time to turn, pop points up to some distance away
-  local dist_thresh = worm.head.speed * Worm.HEAD_UPDATE_FREQ  -- + 1/2 a t^2
-  -- local theta = math.acos()
-  -- local dist_thresh = Worm.TURN_RADIUS / math.tan(theta/2)
-  while worm.target < #worm.path do
+  while worm.target < #worm.path do  -- pop up to the last point
+    -- Since it takes time to turn, pop points up to some distance away. Possibly overkill
+    local theta = Util.delta_orientation(
+      Util.vector_to_orientation({
+        x = worm.head.position.x - worm.path[worm.target].position.x,
+        y = worm.head.position.y - worm.path[worm.target].position.y,
+      }),
+      Util.vector_to_orientation({
+        x = worm.path[worm.target + 1].position.x - worm.path[worm.target].position.x,
+        y = worm.path[worm.target + 1].position.y - worm.path[worm.target].position.y,
+      })
+    )
+    -- The length of two tangents from a circle to their intersection, at angle theta. clip to prevent nan
+    local dist_thresh = Worm.TURN_RADIUS / math.max(0.1, math.abs(math.tan(theta * math.pi)))
     if Util.dist(worm.head.position, worm.path[worm.target].position) < dist_thresh then
       if worm.path_points then
         rendering.set_color(worm.path_points[worm.target], {r=0,g=0,b=64,a=0.01})
@@ -402,6 +418,7 @@ function Worm.update_head(worm)
       -- If almost there, switch to direct_position mode
       worm.mode = "direct_position"
       worm.target = worm.path[#worm.path].position
+      Worm.destroy_path_rendering(worm)
     else
       -- Pop completed points
       Worm.pop_path(worm)
@@ -415,6 +432,14 @@ function Worm.update_head(worm)
 
 end
 
+function Worm.update_heads(tickdata)
+  -- game.print("head"..tickdata.tick)
+  for _, worm in pairs(global.worms) do
+    Worm.update_head(worm)
+  end
+end
+script.on_nth_tick(Worm.HEAD_UPDATE_FREQ, Worm.update_heads)
+
 --- Logic for worm segments; follow the previous segment
 function Worm.update_segment(segment)
   -- Worm.wrap_entity(segment.entity)  -- testing
@@ -427,28 +452,17 @@ function Worm.update_segment(segment)
   segment.entity.orientation = Util.vector_to_orientation(disp)
 end
 
-
 function Worm.update_segments(tickdata)
   -- if tickdata.tick % Worm.HEAD_UPDATE_FREQ == 0 then
   --   game.print("segment"..tickdata.tick)
   -- end
   for _, worm in pairs(global.worms) do
-    for i=1,#worm.segments do
-      Worm.update_segment(worm.segments[#worm.segments+1-i])  -- update in reverse
+    for _, segment in pairs(worm.segments) do
+      Worm.update_segment(segment)
     end
   end
 end
 script.on_nth_tick(Worm.SEGMENT_UPDATE_FREQ, Worm.update_segments)
-
-
-function Worm.update_heads(tickdata)
-  -- game.print("head"..tickdata.tick)
-  for _, worm in pairs(global.worms) do
-    Worm.update_head(worm)
-  end
-end
-script.on_nth_tick(Worm.HEAD_UPDATE_FREQ, Worm.update_heads)
-
 
 
 return Worm

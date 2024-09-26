@@ -13,6 +13,7 @@ local collision_mask = collision_mask_util.get_mask(data.raw["cliff"]["cliff"])
 table.insert(collision_mask, collision_mask_util.get_first_unused_layer())
 data.raw["cliff"]["cliff"].collision_mask = collision_mask
 worm_head.collision_mask = collision_mask
+worm_head.is_military_target = true  -- will be targeted by turrets
 
 worm_segment = table.deepcopy(worm_head)
 worm_segment.name = "worm-segment"
