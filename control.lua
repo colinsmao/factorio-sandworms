@@ -37,17 +37,21 @@ end
 
 
 script.on_init(function()
-  ---@type { [integer]: worm }
-  global.worms = global.worms or {}  -- map worm_id: worm
-  ---@type { [integer]: integer }
-  global.pathfinder_requests = global.pathfinder_requests or {}  -- pending_pathfinder_id: worm_id
+  ---@type { [integer]: worm } worm_id: worm
+  global.worms = global.worms or {}
+  ---@type { [integer]: integer } segment_id: worm_id
+  global.segment_to_worm_id = global.segment_to_worm_id or {}
+  ---@type { [integer]: integer } pathfinder_id: worm_id
+  global.pathfinder_requests = global.pathfinder_requests or {}
 end)
 
 script.on_configuration_changed(function()  -- only for testing, because the format of global could change
-  ---@type { [integer]: worm }
-  global.worms = global.worms or {}  -- map worm_id: worm
-  ---@type { [integer]: integer }
-  global.pathfinder_requests = global.pathfinder_requests or {}  -- pending_pathfinder_id: worm_id
+  ---@type { [integer]: worm } worm_id: worm
+  global.worms = global.worms or {}
+  ---@type { [integer]: integer } segment_id: worm_id
+  global.segment_to_worm_id = global.segment_to_worm_id or {}
+  ---@type { [integer]: integer } pathfinder_id: worm_id
+  global.pathfinder_requests = global.pathfinder_requests or {}
 end)
 
 
@@ -60,11 +64,11 @@ if Worm.HEAD_UPDATE_FREQ == Worm.SEGMENT_UPDATE_FREQ then
   error("Cannot register two functions to the same nth tick.")
 end
 Worm.MIN_SPEED = 3/60  -- tiles per tick; will die/burrow if below this speed (otherwise animations break)
-Worm.MAX_SPEED = 60/60  -- tiles per tick; otherwise animations break
 Worm.TARGET_SPEED = 10/60  -- tiles per tick; will accelerate up to this speed, but will not decelerate if above
 Worm.PATHFINDER_COOLDOWN = 1  -- ticks; cooldown between pathfinder requests
 Worm.TURN_RADIUS = Worm.TARGET_SPEED / (2 * math.pi * 0.0035)  -- tiles; TODO read rotation_speed from prototype
 Worm.CHARGE_RADIUS = 3 * Worm.TURN_RADIUS  -- tiles; distance within the worm just charges straight at the target
+Worm.COLLISION_RADIUS = Worm.TARGET_SPEED * Worm.HEAD_UPDATE_FREQ  -- tiles; count as reached target
 Worm.AGGRO_RANGE = 84  -- tiles; behemoth aggro range TODO read from prototypes
 
 
@@ -106,6 +110,7 @@ function Worm.init(head)  -- assumes head is valid
   worm.target_path = {valid = false}
   worm.debug = {}
   global.worms[worm.id] = worm
+  global.segment_to_worm_id[head.unit_number] = worm.id  -- register
   return worm
 end
 
@@ -131,6 +136,7 @@ function Worm.create_body(worm)
       entity = segment,
       before = before,
     })
+    global.segment_to_worm_id[segment.unit_number] = worm.id  -- register
     before = segment
   end
 end
@@ -138,39 +144,43 @@ end
 
 function Worm.on_entity_created(event)
   local entity
-  if event.entity and event.entity.valid then
+  if event.entity and event.entity.valid then  -- script_raise_built and revive
     entity = event.entity
   end
-  if event.created_entity and event.created_entity.valid then
+  if event.created_entity and event.created_entity.valid then  -- on_{robot_}built_entity
     entity = event.created_entity
   end
+  if event.destination and event.destination.valid then  -- on_entity_cloned
+    entity = event.destination
+  end
   if not entity then return end
-  if entity.name ~= "worm-head" then return end  -- only head defines the worm
 
   local worm = Worm.init(entity)
   worm.head.color = {r=0.5, g=0.0, b=0.0}
   Worm.create_body(worm)
 
 end
--- TODO: add event entity filters
--- clone?
-script.on_event(defines.events.on_built_entity, Worm.on_entity_created)
-script.on_event(defines.events.on_robot_built_entity, Worm.on_entity_created)
-script.on_event(defines.events.script_raised_built, Worm.on_entity_created)
-script.on_event(defines.events.script_raised_revive, Worm.on_entity_created)
+script.on_event(defines.events.on_built_entity, Worm.on_entity_created, {{filter = "name", name = "worm-head"}})
+script.on_event(defines.events.on_robot_built_entity, Worm.on_entity_created, {{filter = "name", name = "worm-head"}})
+script.on_event(defines.events.script_raised_built, Worm.on_entity_created, {{filter = "name", name = "worm-head"}})
+script.on_event(defines.events.script_raised_revive, Worm.on_entity_created, {{filter = "name", name = "worm-head"}})
+script.on_event(defines.events.on_entity_cloned, Worm.on_entity_created, {{filter = "name", name = "worm-head"}})
 
 
 function Worm.on_entity_removed(event)
-  if not event.entity or not event.entity.valid or not event.entity.surface then return end
-  if event.entity.name ~= "worm-head" then return end
+  if not event.entity or not event.entity.valid then return end
 
-  local worm_id = event.entity.unit_number
+  local worm_id = global.segment_to_worm_id[event.entity.unit_number]
   local worm = global.worms[worm_id]
   if worm == nil then return end
 
+  global.segment_to_worm_id[worm_id] = nil
   worm.head.destroy{raise_destroy=false}
   for _, segment in pairs(worm.segments) do
-    if segment.entity.valid then segment.entity.destroy{raise_destroy=false} end
+    if segment.entity.valid then
+      global.segment_to_worm_id[segment.entity.unit_number] = nil
+      segment.entity.destroy{raise_destroy=false}
+    end
   end
 
   if worm.debug.path_points then
@@ -187,10 +197,11 @@ function Worm.on_entity_removed(event)
   global.worms[worm_id] = nil
 
 end
-script.on_event(defines.events.on_entity_died, Worm.on_entity_removed)
-script.on_event(defines.events.on_robot_mined_entity, Worm.on_entity_removed)
-script.on_event(defines.events.on_player_mined_entity, Worm.on_entity_removed)
-script.on_event(defines.events.script_raised_destroy, Worm.on_entity_removed)
+script.on_event(defines.events.on_entity_died, Worm.on_entity_removed, {{filter = "name", name = "worm-head"}, {filter = "name", name = "worm-segment"}})
+script.on_event(defines.events.on_robot_mined_entity, Worm.on_entity_removed, {{filter = "name", name = "worm-head"}, {filter = "name", name = "worm-segment"}})
+script.on_event(defines.events.on_player_mined_entity, Worm.on_entity_removed, {{filter = "name", name = "worm-head"}, {filter = "name", name = "worm-segment"}})
+script.on_event(defines.events.script_raised_destroy, Worm.on_entity_removed, {{filter = "name", name = "worm-head"}, {filter = "name", name = "worm-segment"}})
+
 
 --- debug
 local function update_labels(tickdata)
@@ -226,7 +237,7 @@ script.on_event("left-click", function(event)
     -- path to click
     global.target_entity = player.surface.find_nearest_enemy{
       position = event.cursor_position,
-      max_distance = Worm.AGGRO_RANGE,
+      max_distance = 8,
       force = "enemy",  -- finds enemy of enemy, ie player structures
     }
     for _, worm in pairs(global.worms) do
@@ -251,7 +262,15 @@ script.on_event("left-click", function(event)
     }
     if not head then return end
     local worm = Worm.init(head)
-    worm.head.orientation = math.random()
+    if global.target_entity then
+      worm.head.orientation = Util.vector_to_orientation({
+        x = global.target_entity.position.x - head.position.x,
+        y = global.target_entity.position.y - head.position.y
+      })
+      Worm.set_target_entity(worm, global.target_entity)
+    else
+      worm.head.orientation = math.random()
+    end
     Worm.create_body(worm)  -- requires orientation to be set
     -- ent.speed = Worm.TARGET_SPEED
   elseif cursor_stack.name == "iron-gear-wheel" then
@@ -261,6 +280,7 @@ script.on_event("left-click", function(event)
     end
   end
 end)
+
 
 --- debug destroy path segments
 ---@param worm worm
@@ -528,18 +548,22 @@ function Worm.update_head(worm)
   -- TODO: auto set targets
 
   -- check valid
+  local valid = true
   if worm.mode == "direct_entity" then
     if not worm.target_entity or not worm.target_entity.valid then
-      Worm.set_idle(worm)
+      valid = false
     end
   elseif worm.mode == "direct_position" then
     if not worm.target_position then
-      Worm.set_idle(worm)
+      valid = false
     end
   elseif worm.mode == "path" then
     if not worm.target_path.valid then
-      Worm.set_idle(worm)
+      valid = false
     end
+  end
+  if not valid then
+    Worm.set_idle(worm)
   end
 
   if worm.mode == "path" then

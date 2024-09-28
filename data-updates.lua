@@ -3,7 +3,7 @@ local collision_mask_util = require("__core__/lualib/collision-mask-util")
 worm_head = table.deepcopy(data.raw["car"]["tank"])
 worm_head.name = "worm-head"
 worm_head.minable = {mining_time = 0.5, result = "worm-head"}
-worm_head.friction = 1e-200  -- minimal friction
+-- worm_head.friction = 1e-200  -- minimal friction
 worm_head.terrain_friction_modifier = 0.0
 worm_head.rotation_speed = 0.0035  -- tank = 0.0035
 worm_head.energy_source = {type = "void"}
@@ -51,8 +51,7 @@ worm_head.resistances =
 
 worm_segment = table.deepcopy(worm_head)
 worm_segment.name = "worm-segment"
--- to make the segment still deal high impact damage, even though it's only moving extremely slowly
--- worm_segment.weight = 20000 * 1e6  -- tank = 20000
+worm_head.is_military_target = false
 
 worm_head_item = table.deepcopy(data.raw["item-with-entity-data"]["tank"])
 worm_head_item.name = "worm-head"
