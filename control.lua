@@ -21,8 +21,7 @@ end
 ---@return number orientation
 function Util.vector_to_orientation(vector)
   local orientation = math.atan2(vector.y, vector.x)/(2 * math.pi) + 0.25  -- atan2 [-0.5, 0.5) -> [-0.25, 0.75)
-  if orientation < 0 then ori = orientation + 1 end  -- [0, 1)
-  return orientation
+  return orientation % 1  -- [0, 1)
 end
 
 --- Return the difference of two orientations, in range [-0.5, 0.5)
@@ -71,6 +70,7 @@ Worm.worm_template = {
   mode = "idle",  -- mode {"idle", "direct_position", "direct_entity", "path"}, default "idle"
   target = nil,  -- target position or entity for direct mode, index within path for path mode
   path = nil,  -- array[PathfinderWaypoint] for path mode
+  debug = {},  -- debug info, mostly rendering ids
 }
 
 --- Init a worm object from a worm-head entity
@@ -144,13 +144,13 @@ function Worm.on_entity_removed(event)
     if segment.entity.valid then segment.entity.destroy{raise_destroy=false} end
   end
 
-  if worm.path_points then
-    for _, id in pairs(worm.path_points) do
+  if worm.debug.path_points then
+    for _, id in pairs(worm.debug.path_points) do
       rendering.destroy(id)
     end
   end
-  if worm.path_segments then
-    for _, id in pairs(worm.path_segments) do
+  if worm.debug.path_segments then
+    for _, id in pairs(worm.debug.path_segments) do
       rendering.destroy(id)
     end
   end
@@ -226,24 +226,24 @@ end)
 
 --- debug destroy path segments
 function Worm.destroy_path_rendering(worm)
-  if worm.path_points then
-    for _, id in pairs(worm.path_points) do
+  if worm.debug.path_points then
+    for _, id in pairs(worm.debug.path_points) do
       rendering.destroy(id)
     end
   end
-  if worm.path_segments then
-    for _, id in pairs(worm.path_segments) do
+  if worm.debug.path_segments then
+    for _, id in pairs(worm.debug.path_segments) do
       rendering.destroy(id)
     end
   end
-  worm.path_points = nil
-  worm.path_segments = nil
+  worm.debug.path_points = nil
+  worm.debug.path_segments = nil
 end
 
 -- debug draw or update direct path
 function Worm.draw_direct_path(worm, target)
-  if not worm.path_direct or not rendering.is_valid(worm.path_direct) then
-    worm.path_direct = rendering.draw_line{
+  if not worm.debug.path_direct or not rendering.is_valid(worm.debug.path_direct) then
+    worm.debug.path_direct = rendering.draw_line{
       color = {r=0,g=64,b=0,a=0.01},
       width = 3,
       from = worm.head,
@@ -251,8 +251,8 @@ function Worm.draw_direct_path(worm, target)
       surface = worm.head.surface,
     }
   else
-    -- rendering.set_from(worm.path_direct, worm.head)
-    rendering.set_to(worm.path_direct, target)
+    -- rendering.set_from(worm.debug.path_direct, worm.head)
+    rendering.set_to(worm.debug.path_direct, target)
   end
 end
 
@@ -305,18 +305,18 @@ function Worm.set_path(event)
 
   Worm.draw_direct_path(worm, worm.path[#worm.path].position)
   Worm.destroy_path_rendering(worm)
-  worm.path_points = {}
-  worm.path_segments = {}
+  worm.debug.path_points = {}
+  worm.debug.path_segments = {}
   prev_pos = worm.head.position
   for _, pathpoint in pairs(worm.path) do
-    table.insert(worm.path_segments, rendering.draw_line{
+    table.insert(worm.debug.path_segments, rendering.draw_line{
       color = {r=0,g=64,b=0,a=0.01},
       width = 3,
       from = prev_pos,
       to = pathpoint.position,
       surface = worm.head.surface,
     })
-    table.insert(worm.path_points, rendering.draw_circle{
+    table.insert(worm.debug.path_points, rendering.draw_circle{
       color = {r=0,g=64,b=0,a=0.01},
       radius = 0.5,
       filled = true,
@@ -325,8 +325,8 @@ function Worm.set_path(event)
     })
     prev_pos = pathpoint.position
   end
-  rendering.set_color(worm.path_points[worm.target], {r=0,g=0,b=64,a=0.01})
-  rendering.set_color(worm.path_segments[worm.target], {r=0,g=0,b=64,a=0.01})
+  rendering.set_color(worm.debug.path_points[worm.target], {r=0,g=0,b=64,a=0.01})
+  rendering.set_color(worm.debug.path_segments[worm.target], {r=0,g=0,b=64,a=0.01})
 
 end
 script.on_event(defines.events.on_script_path_request_finished, Worm.set_path)
@@ -418,19 +418,29 @@ function Worm.pop_path(worm)
     -- The length of two tangents from a circle to their intersection, at angle theta. clip to prevent nan
     local dist_thresh = Worm.TURN_RADIUS / math.max(0.1, math.abs(math.tan(theta * math.pi)))
     if Util.dist(worm.head.position, worm.path[worm.target].position) < dist_thresh then
-      if worm.path_points then
-        rendering.set_color(worm.path_points[worm.target], {r=0,g=0,b=64,a=0.01})
-        rendering.set_color(worm.path_points[worm.target + 1], {r=64,g=0,b=0,a=0.01})
+      if worm.debug.path_points then
+        rendering.set_color(worm.debug.path_points[worm.target], {r=0,g=0,b=64,a=0.01})
+        rendering.set_color(worm.debug.path_points[worm.target + 1], {r=64,g=0,b=0,a=0.01})
       end
-      if worm.path_segments then
-        rendering.set_color(worm.path_segments[worm.target], {r=0,g=0,b=64,a=0.01})
-        rendering.set_color(worm.path_segments[worm.target + 1], {r=64,g=0,b=0,a=0.01})
+      if worm.debug.path_segments then
+        rendering.set_color(worm.debug.path_segments[worm.target], {r=0,g=0,b=64,a=0.01})
+        rendering.set_color(worm.debug.path_segments[worm.target + 1], {r=64,g=0,b=0,a=0.01})
       end
       worm.target = worm.target + 1
     else
       break
     end
   end
+end
+
+function Worm.set_idle(worm)
+  worm.mode = "idle"
+  worm.target = nil
+  if worm.debug.path_direct then
+    rendering.destroy(worm.debug.path_direct)
+    worm.debug.path_direct = nil
+  end
+  Worm.destroy_path_rendering(worm)
 end
 
 --- Logic for worm heads, the only 'smart' part of a worm
@@ -441,16 +451,16 @@ function Worm.update_head(worm)
 
   -- check valid
   if worm.mode == "direct_entity" then
-    if not worm.target or not worm.target.position then
-      worm.mode = "idle"
+    if not worm.target or not worm.target.valid or not worm.target.position then
+      Worm.set_idle(worm)
     end
   elseif worm.mode == "direct_position" then
     if not worm.target then
-      worm.mode = "idle"
+      Worm.set_idle(worm)
     end
   elseif worm.mode == "path" then
     if not worm.path or #worm.path <= 0 then
-      worm.mode = "idle"
+      Worm.set_idle(worm)
     end
   end
 
