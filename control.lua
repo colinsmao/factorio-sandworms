@@ -77,13 +77,12 @@ Segment.__index = Segment
 
 ---@class Path table containing path info
 ---@field valid boolean if the path has been successfully requested
+---@field retries integer current retry count for this target
 ---@field path PathfinderWaypoint[]? response from request_path
 ---@field idx integer? target idx within path
 ---@field pending_pathfinder_id integer? latest request id
 ---@field pending_pathfinder_tick integer? latest request tick (for cooldown)
 ---@field pending_position MapPosition? to fill in target_position if request is successful
----@field pending_entity LuaEntity? to fill in target_entity if request is successful
-
 
 Worm.WORM_LENGTH = 10  -- length of worm in segments (not counting head)
 Worm.SEGMENT_SEP = 2  -- tiles; separation between segments
@@ -95,10 +94,11 @@ end
 Worm.MIN_SPEED = 3/60  -- tiles per tick; will die/burrow if below this speed (otherwise animations break)
 Worm.TARGET_SPEED = 10/60  -- tiles per tick; will accelerate up to this speed, but will not decelerate if above
 Worm.PATHFINDER_COOLDOWN = 1  -- ticks; cooldown between pathfinder requests
+Worm.PATHFINDER_MAX_RETRY = 3  -- int; max retries per pathfinder target
 Worm.TURN_RADIUS = Worm.TARGET_SPEED / (2 * math.pi * 0.0035)  -- tiles; TODO read rotation_speed from prototype
 Worm.CHARGE_RADIUS = 3 * Worm.TURN_RADIUS  -- tiles; distance within the worm just charges straight at the target
 Worm.COLLISION_RADIUS = Worm.TARGET_SPEED * Worm.HEAD_UPDATE_FREQ  -- tiles; count as reached target
-Worm.AGGRO_RANGE = 84  -- tiles; behemoth aggro range TODO read from prototypes
+Worm.AGGRO_RANGE = 48  -- tiles; behemoth worm shooting range TODO read from prototypes
 
 
 --- Constructor; init from a worm-head entity. Assumes head is valid
@@ -113,6 +113,14 @@ function Worm:new(head)
   worm.mode = "idle"
   worm.target_path = {valid = false}
   worm.debug = {}
+  worm.debug.range = rendering.draw_circle{
+    color = {r=1, g=0, b=0, a=0.001},
+    radius = Worm.AGGRO_RANGE,
+    width = 3,
+    target = head,
+    surface = head.surface,
+    draw_on_ground = true,
+  }
   global.worms[worm.id] = worm
   global.segment_to_worm_id[head.unit_number] = worm.id  -- register
   return worm
@@ -217,28 +225,6 @@ script.on_event(defines.events.on_player_mined_entity, Worm.on_entity_removed, {
 script.on_event(defines.events.script_raised_destroy, Worm.on_entity_removed, {{filter = "name", name = "worm-head"}, {filter = "name", name = "worm-segment"}})
 
 
---- debug
-local function update_labels(tickdata)
-  global.labels = global.labels or {}
-  for _, label in pairs(global.labels) do
-    rendering.destroy(label)
-  end
-  global.labels = {}
-  local player = game.get_player(1)
-  if player == nil then return end
-  for _, ent in pairs(player.surface.find_entities_filtered{name={"worm-head", "worm-segment"}}) do
-    table.insert(global.labels, rendering.draw_text{
-      text = ent.speed * 60,
-      surface = player.surface,
-      target = ent,  -- rendering object will be destroyed automatically when the entity is destroyed
-      target_offset = {0, 1},
-      color = {1, 1, 1}
-    })
-  end
-end
-script.on_nth_tick(6, update_labels)
-
-
 script.on_event("left-click", function(event)
   local player = game.get_player(event.player_index)
   if player == nil then return end
@@ -246,7 +232,7 @@ script.on_event("left-click", function(event)
   if cursor_stack == nil or not cursor_stack.valid_for_read then return end
   if cursor_stack.name == "iron-plate" then
     game.print(event.cursor_position)
-    update_labels(nil)  -- refresh annotations
+    Worm.update_labels(nil)  -- refresh annotations
   elseif cursor_stack.name == "copper-plate" then
     -- path to click
     global.target_entity = player.surface.find_nearest_enemy{
@@ -276,7 +262,7 @@ script.on_event("left-click", function(event)
     }
     if not head then return end
     local worm = Worm:new(head)
-    if global.target_entity then
+    if global.target_entity and global.target_entity.valid then
       worm.head.orientation = Util.vector_to_orientation({
         x = global.target_entity.position.x - head.position.x,
         y = global.target_entity.position.y - head.position.y
@@ -294,6 +280,28 @@ script.on_event("left-click", function(event)
     end
   end
 end)
+
+
+--- debug update labels
+function Worm.update_labels(tickdata)
+  global.labels = global.labels or {}
+  for _, label in pairs(global.labels) do
+    rendering.destroy(label)
+  end
+  global.labels = {}
+  local player = game.get_player(1)
+  if player == nil then return end
+  for _, ent in pairs(player.surface.find_entities_filtered{name={"worm-head", "worm-segment"}}) do
+    table.insert(global.labels, rendering.draw_text{
+      text = ent.speed * 60,
+      surface = player.surface,
+      target = ent,  -- rendering object will be destroyed automatically when the entity is destroyed
+      target_offset = {0, 1},
+      color = {1, 1, 1}
+    })
+  end
+end
+script.on_nth_tick(6, Worm.update_labels)
 
 
 --- debug destroy path segments
@@ -339,11 +347,12 @@ function Worm:set_target_position(target_position)
   if Util.dist(self.head.position, target_position) < Worm.CHARGE_RADIUS then
     self:set_direct_position(target_position)
   else
+    self.target_path.retries = 1
     self:request_path(target_position)
   end
 end
 
---- Set target entity, with pathfinding request if necessary. Note, will pathfind to current entity location
+--- Set target entity, with pathfinding request if necessary. Note, will pathfind to entity position at time of request
 ---@param self Worm
 ---@param target_entity LuaEntity
 function Worm:set_target_entity(target_entity)
@@ -351,16 +360,16 @@ function Worm:set_target_entity(target_entity)
   if Util.dist(self.head.position, target_entity.position) < Worm.CHARGE_RADIUS then
     self:set_direct_entity(target_entity)
   else
+    self.target_path.retries = 1
     self:request_path(target_entity.position)
   end
 end
 
---- Pathfinder request
+--- Pathfinder request; should only be called by set_target_xx, for proper retry management
 ---@param self Worm
 ---@param target_position MapPosition
 function Worm:request_path(target_position)
-  -- global.pathfinder_requests = global.pathfinder_requests or {}  -- pending_pathfinder_id: worm_id
-  if self.target_path.pending_pathfinder_tick and game.tick - self.target_path.pending_pathfinder_tick < Worm.PATHFINDER_COOLDOWN then return end
+  -- if self.target_path.pending_pathfinder_tick and game.tick - self.target_path.pending_pathfinder_tick < Worm.PATHFINDER_COOLDOWN then return end
   self.target_path.pending_pathfinder_id = self.head.surface.request_path{
     bounding_box = self.head.bounding_box,
     collision_mask = self.head.prototype.collision_mask,
@@ -379,28 +388,32 @@ function Worm:request_path(target_position)
   }
   self.target_path.pending_pathfinder_tick = game.tick
   global.pathfinder_requests[self.target_path.pending_pathfinder_id] = self.id
+  self.target_path.pending_position = target_position
 end
 
 --- Process asynchronous pathfinder response
-function Worm.set_path(event)
-  -- game.print(event.id)
-  local worm_id = global.pathfinder_requests[event.id]
+function Worm.set_target_path(event)
+  local worm = global.worms[global.pathfinder_requests[event.id]]
   global.pathfinder_requests[event.id] = nil
-  if event.try_again_later or not event.path then return end
-  local worm = global.worms[worm_id]
   if worm == nil then return end
-  if worm.target_path == nil then return end
   if event.id ~= worm.target_path.pending_pathfinder_id then return end  -- not the latest pathfinder request
+  if event.try_again_later and worm.target_path.retries < Worm.PATHFINDER_MAX_RETRY then
+    worm.target_path.retries = worm.target_path.retries + 1
+    worm:request_path(worm.target_path.pending_position)
+    return
+  end
+  if not event.path then return end
   worm.mode = "path"
   worm.target_path.valid = true
   worm.target_path.path = event.path
   worm.target_path.idx = 1
   worm.target_path.pending_pathfinder_id = nil
   worm.target_path.pending_pathfinder_tick = nil
+  worm.target_position = worm.target_path.pending_position
 
   -- debug path rendering
 
-  worm:draw_direct_path(worm.target_path.path[#worm.target_path.path].position)
+  worm:draw_direct_path(worm.target_position)
   worm:destroy_path_rendering()
   worm.debug.path_points = {}
   worm.debug.path_segments = {}
@@ -426,7 +439,7 @@ function Worm.set_path(event)
   rendering.set_color(worm.debug.path_segments[worm.target_path.idx], {r=0,g=0,b=64,a=0.01})
 
 end
-script.on_event(defines.events.on_script_path_request_finished, Worm.set_path)
+script.on_event(defines.events.on_script_path_request_finished, Worm.set_target_path)
 
 --- Set mode to idle
 ---@param self Worm
@@ -561,29 +574,43 @@ function Worm:update_head()
 
   -- TODO: auto set targets
 
-  -- check valid
-  local valid = true
+  -- check whether the worm should repath, eg reached target, or invalid target (which might mean successfully destroyed)
+  local repath = false
+  -- invalid target
   if self.mode == "direct_entity" then
-    if not self.target_entity or not self.target_entity.valid then
-      valid = false
+    if not self.target_entity.valid then
+      repath = true
+    else
+      local dist = Util.dist(self.head.position, self.target_entity.position)
+      if dist < Worm.COLLISION_RADIUS or dist > 1.2 * Worm.AGGRO_RANGE then  -- buffer to prevent instant retargetting
+        repath = true
+      end
     end
-  elseif self.mode == "direct_position" then
-    if not self.target_position then
-      valid = false
-    end
-  elseif self.mode == "path" then
-    if not self.target_path.valid then
-      valid = false
+  elseif self.mode == "direct_position" or self.mode == "path" then
+    -- path mode also has target_position set. But usually, path mode should've switched to direct mode already
+    if Util.dist(self.head.position, self.target_position) < Worm.COLLISION_RADIUS then
+      repath = true
     end
   end
-  if not valid then
-    self:set_idle()
+  if repath then
+    self:set_idle()  -- idle while waiting for pathfinder request
+    local target_entity = self.head.surface.find_nearest_enemy{  -- is_military_target only
+      position = self.head.position,
+      max_distance = Worm.AGGRO_RANGE,
+      force = self.head.force,  -- finds enemy of enemy, ie player structures
+    }
+    if target_entity then self:set_target_entity(target_entity) end
   end
 
   if self.mode == "path" then
+    if not self.target_path.valid then
+      -- If mode is path but the path is not ready yet, idle
+      self.head.riding_state = {acceleration=defines.riding.acceleration.nothing, direction=defines.riding.direction.straight}
+      return
+    end
     if Util.dist(self.head.position, self.target_path.path[#self.target_path.path].position) < Worm.CHARGE_RADIUS then
       -- If almost there, switch to direct_position mode
-      self:set_direct_position(self.target_path.path[#self.target_path.path].position)
+      self:set_direct_position(self.target_position)
       self:destroy_path_rendering()
     else
       -- Pop completed points

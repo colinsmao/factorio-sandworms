@@ -3,11 +3,13 @@ local collision_mask_util = require("__core__/lualib/collision-mask-util")
 worm_head = table.deepcopy(data.raw["car"]["tank"])
 worm_head.name = "worm-head"
 worm_head.minable = {mining_time = 0.5, result = "worm-head"}
--- worm_head.friction = 1e-200  -- minimal friction
+worm_head.friction = 1e-200  -- minimal friction; tank = 0.002
 worm_head.terrain_friction_modifier = 0.0
 worm_head.rotation_speed = 0.0035  -- tank = 0.0035
 worm_head.energy_source = {type = "void"}
 worm_head.effectivity = 1.0  -- void energy anyways; easier math
+worm_head.weight = 20000  -- tank = 20000
+worm_head.energy_per_hit_point = 0.05  -- tank = 0.5
 -- avoid collision with cliffs, and self
 local collision_mask = collision_mask_util.get_mask(data.raw["cliff"]["cliff"])
 table.insert(collision_mask, collision_mask_util.get_first_unused_layer())
