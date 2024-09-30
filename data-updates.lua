@@ -8,6 +8,7 @@ worm_head.terrain_friction_modifier = 0.0
 worm_head.rotation_speed = 0.0035  -- tank = 0.0035
 worm_head.energy_source = {type = "void"}
 worm_head.effectivity = 1.0  -- void energy anyways; easier math
+worm_head.max_health = 200  -- tank = 2000
 worm_head.weight = 20000  -- tank = 20000
 worm_head.energy_per_hit_point = 0.05  -- tank = 0.5
 -- avoid collision with cliffs, and self
@@ -40,6 +41,10 @@ worm_head.resistances =
     type = "acid",
     decrease = 0,
     percent = 70
+  },
+  {
+    type = "impact",
+    percent = 90
   }
 }
 -- worm_head.damaged_trigger_effect = {
@@ -53,7 +58,7 @@ worm_head.resistances =
 
 worm_segment = table.deepcopy(worm_head)
 worm_segment.name = "worm-segment"
-worm_head.is_military_target = false
+worm_segment.is_military_target = false
 
 worm_head_item = table.deepcopy(data.raw["item-with-entity-data"]["tank"])
 worm_head_item.name = "worm-head"

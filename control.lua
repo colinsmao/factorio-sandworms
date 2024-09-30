@@ -85,7 +85,7 @@ Segment.__index = Segment
 ---@field pending_position MapPosition? to fill in target_position if request is successful
 
 Worm.WORM_LENGTH = 10  -- length of worm in segments (not counting head)
-Worm.SEGMENT_SEP = 2  -- tiles; separation between segments
+Worm.SEGMENT_SEP = 1.2  -- tiles; separation between segments
 Worm.HEAD_UPDATE_FREQ = 10  -- ticks; update frequency for worm heads, which have pathfinding AI and stuff
 Worm.SEGMENT_UPDATE_FREQ = 5  -- ticks; update frequency for worm segments, which are dumb but more numerous
 if Worm.HEAD_UPDATE_FREQ == Worm.SEGMENT_UPDATE_FREQ then
