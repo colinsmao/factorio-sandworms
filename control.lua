@@ -305,8 +305,18 @@ script.on_event("left-click", function(event)
     -- ent.speed = Worm.TARGET_SPEED
   elseif cursor_stack.name == "iron-gear-wheel" then
     -- path to player
-    for _, worm in pairs(global.worms) do
-      Worm.set_direct_entity(worm, player.character)
+    local pos = event.cursor_position
+    for i=0,31 do
+      local head = player.surface.create_entity{
+        name = "big-worm-head",
+        position = {x = pos.x + (i%8) * 8, y = pos.y + math.floor(i/8) * 8},
+        force = "player",
+        create_build_effect_smoke = false,
+        raise_built = false,
+      }
+      if not head then return end
+      local worm = Worm.new(head)
+      worm.head.orientation = i/32
     end
   end
 end)

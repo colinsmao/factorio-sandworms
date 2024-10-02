@@ -77,10 +77,37 @@ local function make_head(size, stats)
   -- }
 
   worm_head.collision_mask = collision_mask
-  for _, anim in pairs(worm_head.animation.layers) do
-    anim.scale = stats.scale * (anim.scale or 1)
-    anim.hr_version.scale = stats.scale * (anim.hr_version.scale or 1)
-  end
+  worm_head.animation =
+  {
+    priority = "low",
+    width = 220,
+    height = 200,
+    frame_count = 1,
+    direction_count = 32,
+    -- shift = util.by_pixel(0, -16),
+    animation_speed = 8,
+    max_advance = 1,
+    scale = stats.scale * 0.5,
+    stripes =
+    {
+      {
+        filename = "__sandworms__/graphics/worm-base-1.png",
+        width_in_frames = 1,
+        height_in_frames = 16
+      },
+      {
+        filename = "__sandworms__/graphics/worm-base-1.png",
+        width_in_frames = 1,
+        height_in_frames = 16
+      }
+    }
+  }
+  worm_head.light_animation = nil
+  worm_head.turret_animation = nil
+  -- for _, anim in pairs(worm_head.animation.layers) do
+  --   anim.scale = stats.scale * (anim.scale or 1)
+  --   anim.hr_version.scale = stats.scale * (anim.hr_version.scale or 1)
+  -- end
 
   return worm_head
 end
