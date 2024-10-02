@@ -1,4 +1,3 @@
-core_util = require("__core__/lualib/util.lua") -- adds table.deepcopy
 
 local Util = {}
 
@@ -59,6 +58,7 @@ end)
 
 ---@class Worm worm object
 ---@field id integer head.unit_number
+---@field size string size {"small", "medium", "big", "behemoth"}
 ---@field head LuaEntity "worm-head" entity
 ---@field segments Segment[] array of worm segments
 ---@field mode string mode {"idle", "direct_position", "direct_entity", "path"}, default "idle"
@@ -97,15 +97,40 @@ Worm.TURN_RADIUS = Worm.TARGET_SPEED / (2 * math.pi * 0.0035)  -- tiles; TODO re
 Worm.CHARGE_RADIUS = 3 * Worm.TURN_RADIUS  -- tiles; distance within the worm just charges straight at the target
 Worm.COLLISION_RADIUS = Worm.TARGET_SPEED * Worm.HEAD_UPDATE_FREQ  -- tiles; count as reached target
 Worm.AGGRO_RANGE = 48  -- tiles; behemoth worm shooting range TODO read from prototypes
+Worm.SIZES = {"small", "medium", "big", "behemoth"}
+
+--- union of func(size) for each size; eg {size.."-worm-head"}
+---@param func fun(size: string): string[]
+function Worm.size_map(func)
+  local list = {}
+  for _, size in pairs(Worm.SIZES) do
+    for _, ret in pairs(func(size)) do
+      table.insert(list, ret)
+    end
+  end
+  return list
+end
 
 
 --- Constructor; init from a worm-head entity. Assumes head is valid
 ---@param head LuaEntity
 ---@return Worm
 function Worm.new(head)
+  local size = ""
+  if head.name == "small-worm-head" then
+    size = "small"
+  elseif head.name == "medium-worm-head" then
+    size = "medium"
+  elseif head.name == "big-worm-head" then
+    size = "big"
+  elseif head.name == "behemoth-worm-head" then
+    size = "behemoth"
+  end
+  if size == "" then error("invalid worm init entity: "..head.name) end
   ---@type Worm
   local worm = {
     id = head.unit_number,
+    size = size,
     head = head,
     segments = {},
     mode = "idle",
@@ -150,7 +175,7 @@ function Worm.create_body(worm)
   local before = worm.head
   for i=1,Worm.WORM_LENGTH do
     local segment = worm.head.surface.create_entity{
-      name = "worm-segment",
+      name = worm.size.."-worm-segment",
       position = {position.x - i * Worm.SEGMENT_SEP * displacement.x, position.y - i * Worm.SEGMENT_SEP * displacement.y},
       force = worm.head.force
     }
@@ -184,11 +209,12 @@ function Worm.on_entity_created(event)
   Worm.create_body(worm)
 
 end
-script.on_event(defines.events.on_built_entity, Worm.on_entity_created, {{filter = "name", name = "worm-head"}})
-script.on_event(defines.events.on_robot_built_entity, Worm.on_entity_created, {{filter = "name", name = "worm-head"}})
-script.on_event(defines.events.script_raised_built, Worm.on_entity_created, {{filter = "name", name = "worm-head"}})
-script.on_event(defines.events.script_raised_revive, Worm.on_entity_created, {{filter = "name", name = "worm-head"}})
-script.on_event(defines.events.on_entity_cloned, Worm.on_entity_created, {{filter = "name", name = "worm-head"}})
+create_filter = Worm.size_map(function(size) return {{filter = "name", name = size.."-worm-head"}} end)
+script.on_event(defines.events.on_built_entity, Worm.on_entity_created, create_filter)
+script.on_event(defines.events.on_robot_built_entity, Worm.on_entity_created, create_filter)
+script.on_event(defines.events.script_raised_built, Worm.on_entity_created, create_filter)
+script.on_event(defines.events.script_raised_revive, Worm.on_entity_created, create_filter)
+script.on_event(defines.events.on_entity_cloned, Worm.on_entity_created, create_filter)
 
 
 function Worm.on_entity_removed(event)
@@ -221,10 +247,11 @@ function Worm.on_entity_removed(event)
   global.worms[worm_id] = nil
 
 end
-script.on_event(defines.events.on_entity_died, Worm.on_entity_removed, {{filter = "name", name = "worm-head"}, {filter = "name", name = "worm-segment"}})
-script.on_event(defines.events.on_robot_mined_entity, Worm.on_entity_removed, {{filter = "name", name = "worm-head"}, {filter = "name", name = "worm-segment"}})
-script.on_event(defines.events.on_player_mined_entity, Worm.on_entity_removed, {{filter = "name", name = "worm-head"}, {filter = "name", name = "worm-segment"}})
-script.on_event(defines.events.script_raised_destroy, Worm.on_entity_removed, {{filter = "name", name = "worm-head"}, {filter = "name", name = "worm-segment"}})
+destroy_filter = Worm.size_map(function(size) return {{filter = "name", name = size.."-worm-head"}, {filter = "name", name = size.."-worm-segment"}} end)
+script.on_event(defines.events.on_entity_died, Worm.on_entity_removed, destroy_filter)
+script.on_event(defines.events.on_robot_mined_entity, Worm.on_entity_removed, destroy_filter)
+script.on_event(defines.events.on_player_mined_entity, Worm.on_entity_removed, destroy_filter)
+script.on_event(defines.events.script_raised_destroy, Worm.on_entity_removed, destroy_filter)
 
 
 script.on_event("left-click", function(event)
@@ -255,8 +282,9 @@ script.on_event("left-click", function(event)
       worm.head.destroy{raise_destroy=true}
     end
   elseif cursor_stack.name == "plastic-bar" then
+    local size = Worm.SIZES[math.random(4)]
     local head = player.surface.create_entity{
-      name = "worm-head",
+      name = size.."-worm-head",
       position = event.cursor_position,
       force = "enemy",
       create_build_effect_smoke = false,
@@ -283,7 +311,7 @@ script.on_event("left-click", function(event)
   end
 end)
 
-
+local ent_filter = Worm.size_map(function(size) return {size.."-worm-head", size.."-worm-segment"} end)
 --- debug update labels
 function Worm.update_labels(tickdata)
   global.labels = global.labels or {}
@@ -293,7 +321,7 @@ function Worm.update_labels(tickdata)
   global.labels = {}
   local player = game.get_player(1)
   if player == nil then return end
-  for _, ent in pairs(player.surface.find_entities_filtered{name={"worm-head", "worm-segment"}}) do
+  for _, ent in pairs(player.surface.find_entities_filtered{name=ent_filter}) do
     table.insert(global.labels, rendering.draw_text{
       text = ent.speed * 60,
       surface = player.surface,
@@ -419,7 +447,7 @@ function Worm.set_target_path(event)
   Worm.destroy_path_rendering(worm)
   worm.debug.path_points = {}
   worm.debug.path_segments = {}
-  prev_pos = worm.head.position
+  local prev_pos = worm.head.position
   for _, pathpoint in pairs(worm.target_path.path) do
     table.insert(worm.debug.path_segments, rendering.draw_line{
       color = {r=0,g=64,b=0,a=0.01},
