@@ -35,6 +35,8 @@ function Util.delta_orientation(target, origin)
 end
 
 
+local WormStats = require("worm-stats")
+
 script.on_init(function()
   ---@type { [integer]: Worm } worm_id: worm
   global.worms = global.worms or {}
@@ -71,6 +73,7 @@ local Worm = {}
 ---@class Segment pair of segment entity and its before entity
 ---@field entity LuaEntity
 ---@field before LuaEntity
+---@field separation number tiles
 local Segment = {}
 
 ---@class Path table containing path info
@@ -83,20 +86,14 @@ local Segment = {}
 ---@field pending_position MapPosition? to fill in target_position if request is successful
 
 Worm.WORM_LENGTH = 10  -- length of worm in segments (not counting head)
-Worm.SEGMENT_SEP = 1.2  -- tiles; separation between segments
+Worm.BASE_SEGMENT_SEP = 1.8  -- tiles; separation between segments (will be scaled by size)
 Worm.HEAD_UPDATE_FREQ = 10  -- ticks; update frequency for worm heads, which have pathfinding AI and stuff
 Worm.SEGMENT_UPDATE_FREQ = 5  -- ticks; update frequency for worm segments, which are dumb but more numerous
 if Worm.HEAD_UPDATE_FREQ == Worm.SEGMENT_UPDATE_FREQ then
   error("Cannot register two functions to the same nth tick.")
 end
-Worm.MIN_SPEED = 3/60  -- tiles per tick; will die/burrow if below this speed (otherwise animations break)
-Worm.TARGET_SPEED = 10/60  -- tiles per tick; will accelerate up to this speed, but will not decelerate if above
 Worm.PATHFINDER_COOLDOWN = 1  -- ticks; cooldown between pathfinder requests
 Worm.PATHFINDER_MAX_RETRY = 3  -- int; max retries per pathfinder target
-Worm.TURN_RADIUS = Worm.TARGET_SPEED / (2 * math.pi * 0.0035)  -- tiles; TODO read rotation_speed from prototype
-Worm.CHARGE_RADIUS = 3 * Worm.TURN_RADIUS  -- tiles; distance within the worm just charges straight at the target
-Worm.COLLISION_RADIUS = Worm.TARGET_SPEED * Worm.HEAD_UPDATE_FREQ  -- tiles; count as reached target
-Worm.AGGRO_RANGE = 48  -- tiles; behemoth worm shooting range TODO read from prototypes
 Worm.SIZES = {"small", "medium", "big", "behemoth"}
 
 --- union of func(size) for each size; eg {size.."-worm-head"}
@@ -142,7 +139,7 @@ function Worm.new(head)
   }
   worm.debug.range = rendering.draw_circle{
     color = {r=1, g=0, b=0, a=0.001},
-    radius = Worm.AGGRO_RANGE,
+    radius = WormStats[worm.size].range,
     width = 3,
     target = head,
     surface = head.surface,
@@ -153,30 +150,19 @@ function Worm.new(head)
   return worm
 end
 
---- Constructor; init from segment entity and before entity
----@param entity LuaEntity the worm-segment entity
----@param before LuaEntity the before entity (can be a worm-segment or a worm-head)
----@return Segment
-function Segment.new(entity, before)
-  ---@type Segment
-  local segment = {
-    entity = entity,
-    before = before,
-  }
-  return segment
-end
 
 --- Create body (list of segments) for a worm
 ---@param worm Worm
 function Worm.create_body(worm)
   local orientation = worm.head.orientation  -- [0, 1) clockwise, north=0
-  local displacement = {x=math.sin(2*math.pi*orientation), y=-math.cos(2*math.pi*orientation)}
+  local sep = WormStats[worm.size].scale * Worm.BASE_SEGMENT_SEP
+  local displacement = {x=sep*math.sin(2*math.pi*orientation), y=-sep*math.cos(2*math.pi*orientation)}
   local position = worm.head.position
   local before = worm.head
   for i=1,Worm.WORM_LENGTH do
     local segment = worm.head.surface.create_entity{
       name = worm.size.."-worm-segment",
-      position = {position.x - i * Worm.SEGMENT_SEP * displacement.x, position.y - i * Worm.SEGMENT_SEP * displacement.y},
+      position = {position.x - i * displacement.x, position.y - i * displacement.y},
       force = worm.head.force
     }
     if not segment then
@@ -184,7 +170,11 @@ function Worm.create_body(worm)
     end
     segment.orientation = orientation  -- not an argument for create_entity
     segment.color = {r=0.0, g=0.5, b=0.0}
-    table.insert(worm.segments, Segment.new(segment, before))
+    table.insert(worm.segments, {
+      entity = segment,
+      before = before,
+      separation = sep
+    })
     global.segment_to_worm_id[segment.unit_number] = worm.id  -- register
     before = segment
   end
@@ -302,7 +292,6 @@ script.on_event("left-click", function(event)
       worm.head.orientation = math.random()
     end
     Worm.create_body(worm)  -- requires orientation to be set
-    -- ent.speed = Worm.TARGET_SPEED
   elseif cursor_stack.name == "iron-gear-wheel" then
     -- path to player
     local pos = event.cursor_position
@@ -321,7 +310,7 @@ script.on_event("left-click", function(event)
   end
 end)
 
-local ent_filter = Worm.size_map(function(size) return {size.."-worm-head", size.."-worm-segment"} end)
+local ent_filter = Worm.size_map(function(size) return {size.."-worm-head"} end)  -- , size.."-worm-segment"
 --- debug update labels
 function Worm.update_labels(tickdata)
   global.labels = global.labels or {}
@@ -384,7 +373,7 @@ end
 ---@param target_position MapPosition
 function Worm.set_target_position(worm, target_position)
   -- If nearby, skip pathfinding request and just go directly there
-  if Util.dist(worm.head.position, target_position) < Worm.CHARGE_RADIUS then
+  if Util.dist(worm.head.position, target_position) < 3 * WormStats[worm.size].turn_radius then
     Worm.set_direct_position(worm, target_position)
   else
     worm.target_path.retries = 1
@@ -397,7 +386,7 @@ end
 ---@param target_entity LuaEntity
 function Worm.set_target_entity(worm, target_entity)
   -- If nearby, skip pathfinding request and just go directly there
-  if Util.dist(worm.head.position, target_entity.position) < Worm.CHARGE_RADIUS then
+  if Util.dist(worm.head.position, target_entity.position) < 3 * WormStats[worm.size].turn_radius then
     Worm.set_direct_entity(worm, target_entity)
   else
     worm.target_path.retries = 1
@@ -525,8 +514,8 @@ end
 ---@return defines.riding.acceleration
 function Worm.get_acceleration(worm)
   if worm.mode == "direct_entity" or worm.mode == "direct_position" or worm.mode == "path" then
-    -- Accelerate up to TARGET_SPEED
-    if worm.head.speed < Worm.TARGET_SPEED then
+    -- Accelerate up to target_speed
+    if worm.head.speed < WormStats[worm.size].target_speed then
       return defines.riding.acceleration.accelerating
     end
     return defines.riding.acceleration.nothing
@@ -552,7 +541,7 @@ end
 ---@param worm Worm
 ---@return defines.riding.direction
 function Worm.get_direction(worm)
-  if worm.head.speed < Worm.MIN_SPEED then
+  if worm.head.speed < 0.25 * WormStats[worm.size].target_speed then  -- prevent buggy looking animations
     return defines.riding.direction.straight
   end
   if worm.mode == "direct_entity" or worm.mode == "direct_position" or worm.mode == "path" then
@@ -590,7 +579,7 @@ function Worm.pop_path(worm)
       })
     )
     -- The length of two tangents from a circle to their intersection, at angle theta. clip to prevent nan
-    local dist_thresh = Worm.TURN_RADIUS / math.max(0.1, math.abs(math.tan(theta * math.pi)))
+    local dist_thresh = WormStats[worm.size].turn_radius / math.max(0.1, math.abs(math.tan(theta * math.pi)))
     if Util.dist(worm.head.position, worm.target_path.path[worm.target_path.idx].position) < dist_thresh then
       if worm.debug.path_points then
         rendering.set_color(worm.debug.path_points[worm.target_path.idx], {r=0,g=0,b=64,a=0.01})
@@ -622,13 +611,13 @@ function Worm.update_head(worm)
       repath = true
     else
       local dist = Util.dist(worm.head.position, worm.target_entity.position)
-      if dist < Worm.COLLISION_RADIUS or dist > 1.2 * Worm.AGGRO_RANGE then  -- buffer to prevent instant retargetting
+      if dist < WormStats[worm.size].target_speed * Worm.HEAD_UPDATE_FREQ or dist > 1.2 * WormStats[worm.size].range then  -- buffer to prevent instant retargetting
         repath = true
       end
     end
   elseif worm.mode == "direct_position" or worm.mode == "path" then
     -- path mode also has target_position set. But usually, path mode should've switched to direct mode already
-    if Util.dist(worm.head.position, worm.target_position) < Worm.COLLISION_RADIUS then
+    if Util.dist(worm.head.position, worm.target_position) < WormStats[worm.size].target_speed * Worm.HEAD_UPDATE_FREQ then
       repath = true
     end
   end
@@ -636,7 +625,7 @@ function Worm.update_head(worm)
     Worm.set_idle(worm)  -- idle while waiting for pathfinder request
     local target_entity = worm.head.surface.find_nearest_enemy{  -- is_military_target only
       position = worm.head.position,
-      max_distance = Worm.AGGRO_RANGE,
+      max_distance = WormStats[worm.size].range,
       force = worm.head.force,  -- finds enemy of enemy, ie player structures
     }
     if target_entity then Worm.set_target_entity(worm, target_entity) end
@@ -648,7 +637,7 @@ function Worm.update_head(worm)
       worm.head.riding_state = {acceleration=defines.riding.acceleration.nothing, direction=defines.riding.direction.straight}
       return
     end
-    if Util.dist(worm.head.position, worm.target_path.path[#worm.target_path.path].position) < Worm.CHARGE_RADIUS then
+    if Util.dist(worm.head.position, worm.target_path.path[#worm.target_path.path].position) < 3 * WormStats[worm.size].turn_radius then
       -- If almost there, switch to direct_position mode
       Worm.set_direct_position(worm, worm.target_position)
       Worm.destroy_path_rendering(worm)
@@ -681,7 +670,7 @@ function Segment.update_segment(segment)
     x = segment.before.position.x - segment.entity.position.x,
     y = segment.before.position.y - segment.entity.position.y
    }
-  local clipped_ratio = math.max(0.1, math.min(2, math.sqrt(disp.x^2 + disp.y^2) / Worm.SEGMENT_SEP))  -- prevent explosion
+  local clipped_ratio = math.max(0.1, math.min(2, math.sqrt(disp.x^2 + disp.y^2) / segment.separation))  -- prevent explosion
   segment.entity.speed = clipped_ratio * segment.before.speed
   segment.entity.orientation = Util.vector_to_orientation(disp)
 end

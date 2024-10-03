@@ -1,113 +1,133 @@
 
+local hit_effects = require("__base__/prototypes/entity/hit-effects.lua")
+local sounds = require("__base__/prototypes/entity/sounds.lua")
+local movement_triggers = require("__base__/prototypes/entity/movement-triggers.lua")
+
 -- avoid collision with cliffs, and self
 local collision_mask_util = require("__core__/lualib/collision-mask-util")
 local collision_mask = collision_mask_util.get_mask(data.raw["cliff"]["cliff"])
 table.insert(collision_mask, collision_mask_util.get_first_unused_layer())
 data.raw["cliff"]["cliff"].collision_mask = collision_mask
 
-local worm_stats = {
-  small = {
-    max_health = 100,
-    scale = 0.5,
-  },
-  medium = {
-    max_health = 200,
-    scale = 0.7,
-  },
-  big = {
-    max_health = 800,
-    scale = 1.0,
-  },
-  behemoth = {
-    max_health = 3200,
-    scale = 1.2,
-  },
-}
+local WormStats = require("worm-stats")
+base_collision_box = {{-0.9, -1.3}, {0.9, 1.3}}
+base_selection_box = {{-0.9, -1.3}, {0.9, 1.3}}
+base_drawing_box = {{-1.8, -1.8}, {1.8, 1.5}}
+
 
 local function make_head(size, stats)
-  local worm_head = table.deepcopy(data.raw["car"]["tank"])
-  worm_head.name = size.."-worm-head"
-  worm_head.minable = {mining_time = 0.5, result = size.."-worm-head"}
-  worm_head.friction = 1e-200  -- minimal friction; tank = 0.002
-  worm_head.terrain_friction_modifier = 0.0
-  worm_head.rotation_speed = 0.0035  -- tank = 0.0035
-  worm_head.energy_source = {type = "void"}
-  worm_head.effectivity = 1.0  -- void energy anyways; easier math
-  worm_head.max_health = stats.max_health  -- tank = 2000
-  worm_head.weight = 20000  -- tank = 20000
-  worm_head.energy_per_hit_point = 0.05  -- tank = 0.5
-  worm_head.is_military_target = true  -- will be targeted by turrets
-  worm_head.resistances =
-  {
-    {
-      type = "fire",
-      decrease = 15,
-      percent = 60
-    },
-    {
-      type = "physical",
-      percent = 160
-    },
-    {
-      type = "impact",
-      decrease = 50,
-      percent = 80
-    },
-    {
-      type = "explosion",
-      percent = -1000
-    },
-    {
-      type = "acid",
-      decrease = 0,
-      percent = 70
-    },
-    {
-      type = "impact",
-      percent = 90
-    }
-  }
-  -- worm_head.damaged_trigger_effect = {
-  --   type = "script",
-  --   effect_id = "worm-damaged"
-  -- }
-  -- worm_head.crash_trigger = {
-  --   type = "script",
-  --   effect_id = "worm-crashed"
-  -- }
+  local worm_head = {
+    type = "car",
+    name = size.."-worm-head",
+    icon = "__base__/graphics/icons/"..size.."-worm.png",  -- use vanilla worm icon for now, TODO
+    icon_size = 64, icon_mipmaps = 4,
+    flags = {"placeable-player", "placeable-enemy", "placeable-off-grid", "not-repairable", "breaths-air"},
+    immune_to_tree_impacts = true,
+    immune_to_rock_impacts = true,
+    inventory_size = 0,
 
-  worm_head.collision_mask = collision_mask
-  worm_head.animation =
-  {
-    priority = "low",
-    width = 220,
-    height = 200,
-    frame_count = 1,
-    direction_count = 32,
-    -- shift = util.by_pixel(0, -16),
-    animation_speed = 8,
-    max_advance = 1,
-    scale = stats.scale * 0.5,
-    stripes =
+    -- inherited from "tank"
+    minable = {mining_time = 0.5, result = size.."-worm-head"},
+    mined_sound = sounds.deconstruct_large(0.8),
+    corpse = "tank-remnants",
+    dying_explosion = "tank-explosion",
+    alert_icon_shift = util.by_pixel(0, -13),
+    damaged_trigger_effect = hit_effects.entity(),
+    vehicle_impact_sound = sounds.generic_impact,
+    track_particle_triggers = movement_triggers.tank,
+    water_reflection = car_reflection(1.2),
+
+    friction = 1e-200,  -- minimal friction; tank = 0.002
+    terrain_friction_modifier = 0.0,
+    energy_source = {type = "void"},
+    effectivity = 1.0,  -- void energy anyways; easier math
+    braking_power = (800*stats.scale).."kW",  -- tank = 800kW
+    consumption = (600*stats.scale).."kW",  -- tank = 600kW
+
+    max_health = stats.max_health,  -- tank = 2000
+    rotation_speed = stats.rotation_speed,  -- tank = 0.0035
+    weight = 20000 * stats.scale^3,  -- tank = 20000
+    energy_per_hit_point = 0.05,  -- tank = 0.5
+    tank_driving = true,
+
+    is_military_target = true,  -- will be targeted by turrets
+    resistances =
     {
       {
-        filename = "__sandworms__/graphics/worm-base-1.png",
-        width_in_frames = 1,
-        height_in_frames = 16
+        type = "fire",
+        decrease = 15,
+        percent = 60
       },
       {
-        filename = "__sandworms__/graphics/worm-base-1.png",
-        width_in_frames = 1,
-        height_in_frames = 16
+        type = "physical",
+        percent = 160
+      },
+      {
+        type = "impact",
+        decrease = 50,
+        percent = 80
+      },
+      {
+        type = "explosion",
+        percent = -1000
+      },
+      {
+        type = "acid",
+        decrease = 0,
+        percent = 70
+      },
+      {
+        type = "impact",
+        percent = 90
       }
-    }
+    },
+    -- damaged_trigger_effect = {
+    --   type = "script",
+    --   effect_id = "worm-damaged"
+    -- }
+    -- crash_trigger = {
+    --   type = "script",
+    --   effect_id = "worm-crashed"
+    -- }
+
+    collision_mask = collision_mask,
+    collision_box = base_collision_box,
+    selection_box = base_selection_box,
+    drawing_box = base_drawing_box,
+    animation =
+    {
+      priority = "low",
+      width = 110,
+      height = 100,
+      frame_count = 1,
+      direction_count = 64,
+      scale = stats.scale,
+      tint = stats.tint,
+      stripes =
+      {
+        {
+          filename = "__sandworms__/graphics/worm-base-1.png",
+          width_in_frames = 1,
+          height_in_frames = 16
+        },
+        {
+          filename = "__sandworms__/graphics/worm-base-2.png",
+          width_in_frames = 1,
+          height_in_frames = 16
+        },
+        {  -- front/back symmetrical
+          filename = "__sandworms__/graphics/worm-base-1.png",
+          width_in_frames = 1,
+          height_in_frames = 16
+        },
+        {
+          filename = "__sandworms__/graphics/worm-base-2.png",
+          width_in_frames = 1,
+          height_in_frames = 16
+        },
+      }
+    },
   }
-  worm_head.light_animation = nil
-  worm_head.turret_animation = nil
-  -- for _, anim in pairs(worm_head.animation.layers) do
-  --   anim.scale = stats.scale * (anim.scale or 1)
-  --   anim.hr_version.scale = stats.scale * (anim.hr_version.scale or 1)
-  -- end
 
   return worm_head
 end
@@ -148,7 +168,7 @@ local function make_item_recipe(size)
   return {worm_head_item, worm_head_recipe}
 end
 
-for size, stats in pairs(worm_stats) do
+for size, stats in pairs(WormStats) do
   local head_prototype = make_head(size, stats)
   local segment_prototype = make_segment(size, head_prototype)
   data:extend({head_prototype, segment_prototype})
