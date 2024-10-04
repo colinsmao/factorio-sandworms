@@ -10,10 +10,12 @@ table.insert(collision_mask, collision_mask_util.get_first_unused_layer())
 data.raw["cliff"]["cliff"].collision_mask = collision_mask
 
 local WormStats = require("worm-stats")
-base_collision_box = {{-0.9, -1.3}, {0.9, 1.3}}
-base_selection_box = {{-0.9, -1.3}, {0.9, 1.3}}
+base_collision_box = {{-1.3, -0.9}, {1.3, 0.9}}
+base_selection_box = {{-1.3, -0.9}, {1.3, 0.9}}
 base_drawing_box = {{-1.8, -1.8}, {1.8, 1.5}}
-
+local function scale_all(box, scale)
+  return {{box[1][1]*scale, box[1][2]*scale}, {box[2][1]*scale, box[2][2]*scale}}
+end
 
 local function make_head(size, stats)
   local worm_head = {
@@ -58,7 +60,7 @@ local function make_head(size, stats)
       },
       {
         type = "explosion",
-        percent = -200
+        percent = -100
       },
       {
         type = "acid",
@@ -95,9 +97,9 @@ local function make_head(size, stats)
     -- }
 
     collision_mask = collision_mask,
-    collision_box = base_collision_box,
-    selection_box = base_selection_box,
-    drawing_box = base_drawing_box,
+    collision_box = scale_all(base_collision_box, stats.scale),
+    selection_box = scale_all(base_selection_box, stats.scale),
+    drawing_box = scale_all(base_drawing_box, stats.scale),
     animation =
     {
       priority = "low",
