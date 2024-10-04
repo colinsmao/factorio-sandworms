@@ -16,10 +16,11 @@ function Util.dist(pos0, pos1)
 end
 
 --- Return the orientation of a vector
----@param vector {x: number, y: number}
+---@param from MapPosition
+---@param to MapPosition
 ---@return number orientation
-function Util.vector_to_orientation(vector)
-  local orientation = math.atan2(vector.y, vector.x)/(2 * math.pi) + 0.25  -- atan2 [-0.5, 0.5) -> [-0.25, 0.75)
+function Util.vector_to_orientation(from, to)
+  local orientation = math.atan2(to.y-from.y, to.x-from.x)/(2 * math.pi) + 0.25  -- atan2 [-0.5, 0.5) -> [-0.25, 0.75)
   return orientation % 1  -- [0, 1)
 end
 
@@ -60,7 +61,7 @@ end)
 
 ---@class Worm worm object
 ---@field id integer head.unit_number
----@field size string size {"small", "medium", "big", "behemoth"}
+---@field size Size size {"small", "medium", "big", "behemoth"}
 ---@field head LuaEntity "worm-head" entity
 ---@field segments Segment[] array of worm segments
 ---@field mode string mode {"idle", "direct_position", "direct_entity", "path"}, default "idle"
@@ -82,14 +83,17 @@ end)
 ---@field idx integer? target idx within path
 ---@field pending_pathfinder_id integer? latest request id
 ---@field pending_pathfinder_tick integer? latest request tick (for cooldown)
----@field pending_position MapPosition? to fill in target_position if request is successful
+---@field pending_position MapPosition? to fill in target_position if request is successful, and for retry
+---@field pending_radius number? for retry
+
+---@alias Size "small"|"medium"|"big"|"behemoth"
 
 
 local Worm = {}
 Worm.WORM_LENGTH = 10  -- length of worm in segments (not counting head)
-Worm.BASE_SEGMENT_SEP = 1.8  -- tiles; separation between segments (will be scaled by size)
+Worm.BASE_SEGMENT_SEP = 2  -- tiles; separation between segments (will be scaled by speed)
 Worm.HEAD_UPDATE_FREQ = 10  -- ticks; update frequency for worm heads, which have pathfinding AI and stuff
-Worm.SEGMENT_UPDATE_FREQ = 5  -- ticks; update frequency for worm segments, which are dumb but more numerous
+Worm.SEGMENT_UPDATE_FREQ = 2  -- ticks; update frequency for worm segments, which are dumb but more numerous
 if Worm.HEAD_UPDATE_FREQ == Worm.SEGMENT_UPDATE_FREQ then
   error("Cannot register two functions to the same nth tick.")
 end
@@ -98,7 +102,7 @@ Worm.PATHFINDER_MAX_RETRY = 3  -- int; max retries per pathfinder target
 Worm.SIZES = {"small", "medium", "big", "behemoth"}
 
 --- union of func(size) for each size; eg {size.."-worm-head"}
----@param func fun(size: string): string[]
+---@param func fun(size: Size): string[]
 function Worm.size_map(func)
   local list = {}
   for _, size in pairs(Worm.SIZES) do
@@ -115,8 +119,8 @@ local head_segment_filter = Worm.size_map(function(size) return {{filter = "name
 --- Constructor; init from a worm-head entity. Assumes head is valid
 ---@param head LuaEntity
 ---@return Worm
-function Worm.new(head)
-  local size = ""
+function Worm._new(head)
+  local size = nil
   if head.name == "small-worm-head" then
     size = "small"
   elseif head.name == "medium-worm-head" then
@@ -126,7 +130,7 @@ function Worm.new(head)
   elseif head.name == "behemoth-worm-head" then
     size = "behemoth"
   end
-  if size == "" then error("invalid worm init entity: "..head.name) end
+  if not size then error("invalid worm init entity: "..head.name) end
   ---@type Worm
   local worm = {
     id = head.unit_number,
@@ -157,7 +161,8 @@ end
 
 --- Create body (list of segments) for a worm
 ---@param worm Worm
-function Worm.create_body(worm)
+---@return boolean success
+function Worm._create_body(worm)
   local orientation = worm.head.orientation  -- [0, 1) clockwise, north=0
   local sep = WormStats[worm.size].scale * Worm.BASE_SEGMENT_SEP
   local displacement = {x=sep*math.sin(2*math.pi*orientation), y=-sep*math.cos(2*math.pi*orientation)}
@@ -169,11 +174,9 @@ function Worm.create_body(worm)
       position = {position.x - i * displacement.x, position.y - i * displacement.y},
       force = worm.head.force
     }
-    if not segment then
-      error("failed to create worm segment")
-    end
+    if not segment then return false end
     segment.orientation = orientation  -- not an argument for create_entity
-    segment.color = {r=0.0, g=0.5, b=0.0}
+    segment.speed = worm.head.speed
     table.insert(worm.segments, {
       entity = segment,
       before = before,
@@ -182,6 +185,35 @@ function Worm.create_body(worm)
     global.segment_to_worm_id[segment.unit_number] = worm.id  -- register
     before = segment
   end
+  return true
+end
+
+--- Create a worm with orientation
+---@param surface LuaSurface
+---@param force ForceIdentification
+---@param size Size
+---@param position MapPosition
+---@param orientation number
+---@param speed number?
+---@return Worm?
+function Worm.create_worm_with_orientation(surface, force, size, position, orientation, speed)
+  speed = speed or 0
+  local head = surface.create_entity{
+    name = size.."-worm-head",
+    position = position,
+    force = force,
+    create_build_effect_smoke = false,
+    raise_built = false,
+  }
+  if not head then return end
+  local worm = Worm._new(head)
+  worm.head.orientation = orientation
+  worm.head.speed = speed
+  if not Worm._create_body(worm) then
+    worm.head.destroy{raise_destroy=true}  -- will also destroy any segments that were created
+    return
+  end
+  return worm
 end
 
 
@@ -198,10 +230,12 @@ function Worm.on_entity_created(event)
   end
   if not entity then return end
 
-  local worm = Worm.new(entity)
+  local worm = Worm._new(entity)
   worm.head.color = {r=0.5, g=0.0, b=0.0}
-  Worm.create_body(worm)
-
+  if not Worm._create_body(worm) then
+    worm.head.destroy{raise_destroy=true}  -- will also destroy any segments that were created
+    return
+  end
 end
 script.on_event(defines.events.on_built_entity, Worm.on_entity_created, head_filter)
 script.on_event(defines.events.on_robot_built_entity, Worm.on_entity_created, head_filter)
@@ -266,7 +300,7 @@ script.on_event("left-click", function(event)
       if global.target_entity then
         Worm.set_target_entity(worm, global.target_entity)
       else
-        Worm.set_target_position(worm, event.cursor_position)
+        Worm.set_target_position(worm, event.cursor_position, 1)
       end
     end
   elseif cursor_stack.name == "steel-plate" then
@@ -276,25 +310,17 @@ script.on_event("left-click", function(event)
     end
   elseif cursor_stack.name == "plastic-bar" then
     local size = Worm.SIZES[math.random(4)]
-    local head = player.surface.create_entity{
-      name = size.."-worm-head",
-      position = event.cursor_position,
-      force = "enemy",
-      create_build_effect_smoke = false,
-      raise_built = false,
-    }
-    if not head then return end
-    local worm = Worm.new(head)
+    local orientation = math.random()
+    local speed = 0
     if global.target_entity and global.target_entity.valid then
-      worm.head.orientation = Util.vector_to_orientation({
-        x = global.target_entity.position.x - head.position.x,
-        y = global.target_entity.position.y - head.position.y
-      })
-      Worm.set_target_entity(worm, global.target_entity)
-    else
-      worm.head.orientation = math.random()
+      orientation = Util.vector_to_orientation(event.cursor_position, global.target_entity.position)
+      speed = WormStats[size].target_speed
     end
-    Worm.create_body(worm)  -- requires orientation to be set
+    local worm = Worm.create_worm_with_orientation(player.surface, "enemy", size, event.cursor_position, orientation, speed)
+    if not worm then return end
+    if global.target_entity and global.target_entity.valid then
+      Worm.set_target_entity(worm, global.target_entity)
+    end
   elseif cursor_stack.name == "iron-gear-wheel" then
     -- path to player
     local pos = event.cursor_position
@@ -307,7 +333,7 @@ script.on_event("left-click", function(event)
         raise_built = false,
       }
       if not head then return end
-      local worm = Worm.new(head)
+      local worm = Worm._new(head)
       worm.head.orientation = i/32
     end
   end
@@ -374,13 +400,14 @@ end
 --- Set target position, with pathfinding request if necessary.
 ---@param worm Worm
 ---@param target_position MapPosition
-function Worm.set_target_position(worm, target_position)
+---@param radius number
+function Worm.set_target_position(worm, target_position, radius)
   -- If nearby, skip pathfinding request and just go directly there
   if Util.dist(worm.head.position, target_position) < 3 * WormStats[worm.size].turn_radius then
     Worm.set_direct_position(worm, target_position)
   else
     worm.target_path.retries = 1
-    Worm.request_path(worm, target_position)
+    Worm.request_path(worm, target_position, radius)
   end
 end
 
@@ -393,14 +420,16 @@ function Worm.set_target_entity(worm, target_entity)
     Worm.set_direct_entity(worm, target_entity)
   else
     worm.target_path.retries = 1
-    Worm.request_path(worm, target_entity.position)
+    Worm.request_path(worm, target_entity.position, 1)
   end
 end
 
 --- Pathfinder request; should only be called by set_target_xx, for proper retry management
 ---@param worm Worm
 ---@param target_position MapPosition
-function Worm.request_path(worm, target_position)
+---@param radius number
+function Worm.request_path(worm, target_position, radius)
+  radius = radius or 1
   -- if worm.target_path.pending_pathfinder_tick and game.tick - worm.target_path.pending_pathfinder_tick < Worm.PATHFINDER_COOLDOWN then return end
   worm.target_path.pending_pathfinder_id = worm.head.surface.request_path{
     bounding_box = worm.head.bounding_box,
@@ -415,12 +444,13 @@ function Worm.request_path(worm, target_position)
     },
     force = worm.head.force,
     can_open_gates = false,
-    radius = 1,
+    radius = radius,
     path_resolution_modifier = -3,  -- resolution = 2^-x
   }
   worm.target_path.pending_pathfinder_tick = game.tick
   global.pathfinder_requests[worm.target_path.pending_pathfinder_id] = worm.id
   worm.target_path.pending_position = target_position
+  worm.target_path.pending_radius = radius
 end
 
 --- Process asynchronous pathfinder response
@@ -431,7 +461,7 @@ function Worm.set_target_path(event)
   if event.id ~= worm.target_path.pending_pathfinder_id then return end  -- not the latest pathfinder request
   if event.try_again_later and worm.target_path.retries < Worm.PATHFINDER_MAX_RETRY then
     worm.target_path.retries = worm.target_path.retries + 1
-    Worm.request_path(worm, worm.target_path.pending_position)
+    Worm.request_path(worm, worm.target_path.pending_position, worm.target_path.pending_radius)
     return
   end
   if not event.path then return end
@@ -549,11 +579,7 @@ function Worm.get_direction(worm)
   end
   if worm.mode == "direct_entity" or worm.mode == "direct_position" or worm.mode == "path" then
     local target_position = Worm.get_target_position(worm)
-    local disp = {
-      x = target_position.x - worm.head.position.x,
-      y = target_position.y - worm.head.position.y
-    }
-    local delta = Util.delta_orientation(Util.vector_to_orientation(disp), worm.head.orientation)
+    local delta = Util.delta_orientation(Util.vector_to_orientation(worm.head.position, target_position), worm.head.orientation)
     if math.abs(delta) >= 0.5 * worm.head.prototype.rotation_speed * Worm.HEAD_UPDATE_FREQ then
       if delta < 0 then
         return defines.riding.direction.left
@@ -572,14 +598,8 @@ function Worm.pop_path(worm)
   while worm.target_path.idx < #worm.target_path.path do  -- pop up to the last point
     -- Since it takes time to turn, pop points up to some distance away. Possibly overkill
     local theta = Util.delta_orientation(
-      Util.vector_to_orientation({
-        x = worm.head.position.x - worm.target_path.path[worm.target_path.idx].position.x,
-        y = worm.head.position.y - worm.target_path.path[worm.target_path.idx].position.y,
-      }),
-      Util.vector_to_orientation({
-        x = worm.target_path.path[worm.target_path.idx + 1].position.x - worm.target_path.path[worm.target_path.idx].position.x,
-        y = worm.target_path.path[worm.target_path.idx + 1].position.y - worm.target_path.path[worm.target_path.idx].position.y,
-      })
+      Util.vector_to_orientation(worm.target_path.path[worm.target_path.idx].position, worm.head.position),
+      Util.vector_to_orientation(worm.target_path.path[worm.target_path.idx].position, worm.target_path.path[worm.target_path.idx + 1].position)
     )
     -- The length of two tangents from a circle to their intersection, at angle theta. clip to prevent nan
     local dist_thresh = WormStats[worm.size].turn_radius / math.max(0.1, math.abs(math.tan(theta * math.pi)))
@@ -687,31 +707,91 @@ function Worm.update_heads(tickdata)
 end
 script.on_nth_tick(Worm.HEAD_UPDATE_FREQ, Worm.update_heads)
 
-
---- Logic for worm segments; follow the previous segment
----@param segment Segment
-function Worm.update_segment(segment)
-  local disp = {
-    x = segment.before.position.x - segment.entity.position.x,
-    y = segment.before.position.y - segment.entity.position.y
-   }
-  local clipped_ratio = math.max(0.1, math.min(2, math.sqrt(disp.x^2 + disp.y^2) / segment.separation))  -- prevent explosion
-  segment.entity.speed = clipped_ratio * segment.before.speed
-  segment.entity.orientation = Util.vector_to_orientation(disp)
-end
-
 function Worm.update_segments(tickdata)
-  -- if tickdata.tick % Worm.HEAD_UPDATE_FREQ == 0 then
-  --   game.print("segment"..tickdata.tick)
-  -- end
   for _, worm in pairs(global.worms) do
     for _, segment in pairs(worm.segments) do
-      Worm.update_segment(segment)
+      -- follow the previous segment
+      local ratio = Util.dist(segment.entity.position, segment.before.position) / segment.separation
+      ratio = math.max(0.5, math.min(1.5, ratio))  -- prevent explosion
+      segment.entity.speed = ratio * worm.head.speed
+      segment.entity.orientation = Util.vector_to_orientation(segment.entity.position, segment.before.position)
     end
   end
 end
 script.on_nth_tick(Worm.SEGMENT_UPDATE_FREQ, Worm.update_segments)
 
+-- Example group: 5 small 5 medium biters: 5/75 small, 10/75 medium worm spawn chance
+-- Only one worm per unit group (for now. TODO?)
+Worm.WEIGHT_NO_WORM = 60  -- base weight of spawning no worm
+Worm.WEIGHT_SMALL_WORM = 1  -- weight of spawning small worm, per small biter/spitter
+Worm.WEIGHT_MEDIUM_WORM = 2  -- same for medium/big/behemoth worms
+Worm.WEIGHT_BIG_WORM = 2
+Worm.WEIGHT_BEHEMOTH_WORM = 3
+Worm.GROUP_SEP = 20  -- tiles; distance away from group center to spawn worm, to reduce chance of collisions
+---@param event EventData.on_unit_group_finished_gathering
+function Worm.create_worm_with_group(event)
+  local group = event.group
+  local target_position, target_entity, target_radius = nil, nil, 3
+  if group.command.type == defines.command.attack then
+    target_entity = group.command.target
+  elseif group.command.type == defines.command.attack_area then
+    target_position = group.command.destination
+    target_radius = group.command.radius or 3
+  elseif group.command.type == defines.command.go_to_location then
+    target_position = group.command.destination
+    if group.command.destination_entity and group.command.destination_entity.valid then
+      target_entity = group.command.destination_entity
+    end
+    target_radius = group.command.radius or 3
+  end
+  if target_entity and target_entity.valid then target_position = target_entity.position end
+  game.print(target_position)
+  if not target_position then return end
+
+  local weights = {0,0,0,0}
+  for _, entity in pairs(group.members) do
+    if entity.name == "small-biter" or entity.name == "small-spitter" then
+      weights[1] = weights[1] + Worm.WEIGHT_SMALL_WORM
+    elseif entity.name == "medium-biter" or entity.name == "medium-spitter" then
+      weights[2] = weights[2] + Worm.WEIGHT_MEDIUM_WORM
+    elseif entity.name == "big-biter" or entity.name == "big-spitter" then
+      weights[3] = weights[3] + Worm.WEIGHT_BIG_WORM
+    elseif entity.name == "behemoth-biter" or entity.name == "behemoth-spitter" then
+      weights[4] = weights[4] + Worm.WEIGHT_BEHEMOTH_WORM
+    end
+  end
+  local total_weight = Worm.WEIGHT_NO_WORM + weights[1] + weights[2] + weights[3] + weights[4]
+  local chance = math.random(total_weight)
+  local weight = Worm.WEIGHT_NO_WORM
+  if chance <= weight then return end
+  for i=1,4 do
+    weight = weight + weights[i]
+    if chance <= weight then
+      -- spawn the worm to the side of the group, to reduce chance of collisions
+      local orientation = Util.vector_to_orientation(group.position, target_position)
+      local rand = math.random()
+      if rand < 0.5 then
+        orientation = orientation - 0.25
+      else
+        orientation = orientation + 0.25
+      end
+      local size = Worm.SIZES[i]
+      local spawn_position = {
+        x = group.position.x - WormStats[size].scale * Worm.GROUP_SEP * math.sin(2*math.pi*orientation),
+        y = group.position.y + WormStats[size].scale * Worm.GROUP_SEP * math.cos(2*math.pi*orientation)
+      }
+      local worm = Worm.create_worm_with_orientation(group.surface, group.force, size, spawn_position, Util.vector_to_orientation(spawn_position, target_position), WormStats[size].target_speed)
+      if not worm then return end
+      if target_entity and target_entity.valid then
+        Worm.set_target_entity(worm, target_entity)
+      else
+        Worm.set_target_position(worm, target_position, math.min(target_radius, WormStats[size].range * 0.95))
+      end
+      return
+    end
+  end
+end
+script.on_event(defines.events.on_unit_group_finished_gathering, Worm.create_worm_with_group)
 
 script.on_event(defines.events.on_script_trigger_effect, function(event)
   game.print("id="..event.effect_id)

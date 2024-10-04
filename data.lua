@@ -46,6 +46,7 @@ local function make_head(size, stats)
     consumption = (600*stats.scale).."kW",  -- tank = 600kW
 
     max_health = stats.max_health,  -- tank = 2000
+    healing_per_tick = stats.max_health / (30*60),  -- 30 seconds to heal to full
     rotation_speed = stats.rotation_speed,  -- tank = 0.0035
     weight = 20000 * stats.scale^3,  -- tank = 20000
     energy_per_hit_point = 0.05,  -- tank = 0.5

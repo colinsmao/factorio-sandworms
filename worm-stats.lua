@@ -28,7 +28,7 @@ prepare_range_worm_big      = 24
 prepare_range_worm_behemoth = 36
 
 
-base_target_speed = 12/60  -- tiles per tick
+base_target_speed = 15/60  -- tiles per tick; will accelerate up to this speed, but will not decelerate if above
 base_rotation_speed = 0.0035  -- rotations per tick; tank = 0.0035
 
 -- shared worm stats used by both data.lua and control.lua
@@ -38,29 +38,33 @@ local WormStats = {
     scale = small_biter_scale,  -- 0.5
     tint = small_biter_tint2,
     range = range_worm_small + prepare_range_worm_small,
+    target_speed = 0.22,  -- biter 0.20
   },
   medium = {
     max_health = 200,
     scale = medium_biter_scale,  -- 0.7
     tint = medium_biter_tint2,
     range = range_worm_medium + prepare_range_worm_medium,
+    target_speed = 0.26, -- biter 0.24
   },
   big = {
     max_health = 800,
     scale = big_biter_scale,  -- 1.0
     tint = big_biter_tint2,
     range = range_worm_big + prepare_range_worm_big,
+    target_speed = 0.25,  -- biter 0.23
   },
   behemoth = {
     max_health = 3200,
     scale = behemoth_biter_scale,  -- 1.2
     tint = behemoth_biter_tint2,
     range = range_worm_behemoth + prepare_range_worm_behemoth,
+    target_speed = 0.32,  -- biter 0.30
   },
 }
 
 for size, stats in pairs(WormStats) do
-  stats.target_speed = base_target_speed * math.sqrt(stats.scale)  -- tiles per tick; will accelerate up to this speed, but will not decelerate if above
+  -- stats.target_speed = base_target_speed * math.sqrt(stats.scale)
   stats.rotation_speed = base_rotation_speed  -- rotations per tick
   stats.turn_radius = stats.target_speed / (2 * math.pi * stats.rotation_speed)  -- tiles
 end
