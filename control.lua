@@ -67,14 +67,13 @@ end)
 ---@field target_position MapPosition? must exist for direct_position, could exist for path
 ---@field target_entity LuaEntity? must exist for direct_entity, could exist for path
 ---@field target_path Path table containing path info
+---@field accumulated_damage { [integer]: float } entity_id: accumulated damage taken
 ---@field debug table debug info, mostly rendering ids
-local Worm = {}
 
 ---@class Segment pair of segment entity and its before entity
 ---@field entity LuaEntity
 ---@field before LuaEntity
 ---@field separation number tiles
-local Segment = {}
 
 ---@class Path table containing path info
 ---@field valid boolean if the path has been successfully requested
@@ -85,6 +84,8 @@ local Segment = {}
 ---@field pending_pathfinder_tick integer? latest request tick (for cooldown)
 ---@field pending_position MapPosition? to fill in target_position if request is successful
 
+
+local Worm = {}
 Worm.WORM_LENGTH = 10  -- length of worm in segments (not counting head)
 Worm.BASE_SEGMENT_SEP = 1.8  -- tiles; separation between segments (will be scaled by size)
 Worm.HEAD_UPDATE_FREQ = 10  -- ticks; update frequency for worm heads, which have pathfinding AI and stuff
@@ -107,6 +108,8 @@ function Worm.size_map(func)
   end
   return list
 end
+local head_filter = Worm.size_map(function(size) return {{filter = "name", name = size.."-worm-head"}} end)
+local head_segment_filter = Worm.size_map(function(size) return {{filter = "name", name = size.."-worm-head"}, {filter = "name", name = size.."-worm-segment"}} end)
 
 
 --- Constructor; init from a worm-head entity. Assumes head is valid
@@ -135,6 +138,7 @@ function Worm.new(head)
       valid = false,
       retries = 1,
     },
+    accumulated_damage = {},
     debug = {},
   }
   worm.debug.range = rendering.draw_circle{
@@ -199,20 +203,20 @@ function Worm.on_entity_created(event)
   Worm.create_body(worm)
 
 end
-create_filter = Worm.size_map(function(size) return {{filter = "name", name = size.."-worm-head"}} end)
-script.on_event(defines.events.on_built_entity, Worm.on_entity_created, create_filter)
-script.on_event(defines.events.on_robot_built_entity, Worm.on_entity_created, create_filter)
-script.on_event(defines.events.script_raised_built, Worm.on_entity_created, create_filter)
-script.on_event(defines.events.script_raised_revive, Worm.on_entity_created, create_filter)
-script.on_event(defines.events.on_entity_cloned, Worm.on_entity_created, create_filter)
+script.on_event(defines.events.on_built_entity, Worm.on_entity_created, head_filter)
+script.on_event(defines.events.on_robot_built_entity, Worm.on_entity_created, head_filter)
+script.on_event(defines.events.script_raised_built, Worm.on_entity_created, head_filter)
+script.on_event(defines.events.script_raised_revive, Worm.on_entity_created, head_filter)
+script.on_event(defines.events.on_entity_cloned, Worm.on_entity_created, head_filter)
 
 
 function Worm.on_entity_removed(event)
   if not event.entity or not event.entity.valid then return end
 
   local worm_id = global.segment_to_worm_id[event.entity.unit_number]
+  if not worm_id then return end
   local worm = global.worms[worm_id]
-  if worm == nil then return end
+  if not worm then return end
 
   global.segment_to_worm_id[worm_id] = nil
   worm.head.destroy{raise_destroy=false}
@@ -237,18 +241,17 @@ function Worm.on_entity_removed(event)
   global.worms[worm_id] = nil
 
 end
-destroy_filter = Worm.size_map(function(size) return {{filter = "name", name = size.."-worm-head"}, {filter = "name", name = size.."-worm-segment"}} end)
-script.on_event(defines.events.on_entity_died, Worm.on_entity_removed, destroy_filter)
-script.on_event(defines.events.on_robot_mined_entity, Worm.on_entity_removed, destroy_filter)
-script.on_event(defines.events.on_player_mined_entity, Worm.on_entity_removed, destroy_filter)
-script.on_event(defines.events.script_raised_destroy, Worm.on_entity_removed, destroy_filter)
+script.on_event(defines.events.on_entity_died, Worm.on_entity_removed, head_segment_filter)
+script.on_event(defines.events.on_robot_mined_entity, Worm.on_entity_removed, head_segment_filter)
+script.on_event(defines.events.on_player_mined_entity, Worm.on_entity_removed, head_segment_filter)
+script.on_event(defines.events.script_raised_destroy, Worm.on_entity_removed, head_segment_filter)
 
 
 script.on_event("left-click", function(event)
   local player = game.get_player(event.player_index)
-  if player == nil then return end
+  if not player then return end
   local cursor_stack = player.cursor_stack
-  if cursor_stack == nil or not cursor_stack.valid_for_read then return end
+  if not cursor_stack or not cursor_stack.valid_for_read then return end
   if cursor_stack.name == "iron-plate" then
     game.print(event.cursor_position)
     Worm.update_labels(nil)  -- refresh annotations
@@ -319,7 +322,7 @@ function Worm.update_labels(tickdata)
   end
   global.labels = {}
   local player = game.get_player(1)
-  if player == nil then return end
+  if not player then return end
   for _, ent in pairs(player.surface.find_entities_filtered{name=ent_filter}) do
     table.insert(global.labels, rendering.draw_text{
       text = ent.speed * 60,
@@ -424,7 +427,7 @@ end
 function Worm.set_target_path(event)
   local worm = global.worms[global.pathfinder_requests[event.id]]
   global.pathfinder_requests[event.id] = nil
-  if worm == nil then return end
+  if not worm then return end
   if event.id ~= worm.target_path.pending_pathfinder_id then return end  -- not the latest pathfinder request
   if event.try_again_later and worm.target_path.retries < Worm.PATHFINDER_MAX_RETRY then
     worm.target_path.retries = worm.target_path.retries + 1
@@ -596,6 +599,28 @@ function Worm.pop_path(worm)
   end
 end
 
+
+--- Emulate "distractions" by hooking to on_entity_damaged
+function Worm.on_entity_damaged(event)
+  if not event.entity or not event.entity.valid then return end
+  local worm_id = global.segment_to_worm_id[event.entity.unit_number]
+  if not worm_id then return end
+  local worm = global.worms[worm_id]
+  if not worm then error("on_entity_damaged: invalid worm") end
+  if not event.force or not worm.head.force.is_enemy(event.force) then return end
+  if not event.cause and not event.cause.valid then return end
+  local cid = event.cause.unit_number
+  if not cid then return end
+  -- game.print("dmg src: "..event.cause.name..":"..event.cause.unit_number.."="..event.final_damage_amount)
+  worm.accumulated_damage[cid] = (worm.accumulated_damage[cid] or 0) + event.final_damage_amount
+  if worm.accumulated_damage[cid] > WormStats[worm.size].max_health * 0.2 then
+    Worm.set_target_entity(worm, event.cause)
+    worm.accumulated_damage = {}  -- reset accumulated damage
+  end
+end
+script.on_event(defines.events.on_entity_damaged, Worm.on_entity_damaged, head_segment_filter)
+
+
 --- Logic for worm heads, the only 'smart' part of a worm
 ---@param worm Worm
 function Worm.update_head(worm)
@@ -665,7 +690,7 @@ script.on_nth_tick(Worm.HEAD_UPDATE_FREQ, Worm.update_heads)
 
 --- Logic for worm segments; follow the previous segment
 ---@param segment Segment
-function Segment.update_segment(segment)
+function Worm.update_segment(segment)
   local disp = {
     x = segment.before.position.x - segment.entity.position.x,
     y = segment.before.position.y - segment.entity.position.y
@@ -681,7 +706,7 @@ function Worm.update_segments(tickdata)
   -- end
   for _, worm in pairs(global.worms) do
     for _, segment in pairs(worm.segments) do
-      Segment.update_segment(segment)
+      Worm.update_segment(segment)
     end
   end
 end

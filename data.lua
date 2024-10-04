@@ -35,7 +35,6 @@ local function make_head(size, stats)
     damaged_trigger_effect = hit_effects.entity(),
     vehicle_impact_sound = sounds.generic_impact,
     track_particle_triggers = movement_triggers.tank,
-    water_reflection = car_reflection(1.2),
 
     friction = 1e-200,  -- minimal friction; tank = 0.002
     terrain_friction_modifier = 0.0,
@@ -54,32 +53,37 @@ local function make_head(size, stats)
     resistances =
     {
       {
-        type = "fire",
-        decrease = 15,
-        percent = 60
-      },
-      {
-        type = "physical",
-        percent = 160
-      },
-      {
         type = "impact",
-        decrease = 50,
-        percent = 80
+        percent = 75
       },
       {
         type = "explosion",
-        percent = -1000
+        percent = -200
       },
       {
         type = "acid",
-        decrease = 0,
-        percent = 70
+        percent = 90
       },
       {
-        type = "impact",
+        type = "poison",
         percent = 90
-      }
+      },
+      {
+        type = "fire",
+        percent = 90
+      },
+      {
+        type = "physical",
+        percent = 90
+      },
+      {
+        type = "laser",
+        percent = 90
+      },
+      {
+        type = "electric",
+        percent = 90
+      },
     },
     -- damaged_trigger_effect = {
     --   type = "script",
