@@ -69,6 +69,7 @@ end)
 ---@field target_entity LuaEntity? must exist for direct_entity, could exist for path
 ---@field target_path Path table containing path info
 ---@field accumulated_damage { [integer]: float } entity_id: accumulated damage taken
+---@field dying boolean flag to prevent infinite loop during on_entity_died
 ---@field debug table debug info, mostly rendering ids
 
 ---@class Segment pair of segment entity and its before entity
@@ -143,6 +144,7 @@ function Worm._new(head)
       retries = 1,
     },
     accumulated_damage = {},
+    dying = false,
     debug = {},
   }
   worm.debug.range = rendering.draw_circle{
@@ -216,7 +218,7 @@ function Worm.create_worm_with_orientation(surface, force, size, position, orien
   return worm
 end
 
-
+---@param event EventData.on_built_entity|EventData.script_raised_built|EventData.on_entity_cloned
 function Worm.on_entity_created(event)
   local entity
   if event.entity and event.entity.valid then  -- script_raise_built and revive
@@ -243,7 +245,7 @@ script.on_event(defines.events.script_raised_built, Worm.on_entity_created, head
 script.on_event(defines.events.script_raised_revive, Worm.on_entity_created, head_filter)
 script.on_event(defines.events.on_entity_cloned, Worm.on_entity_created, head_filter)
 
-
+---@param event EventData.on_entity_died
 function Worm.on_entity_removed(event)
   if not event.entity or not event.entity.valid then return end
 
@@ -251,14 +253,32 @@ function Worm.on_entity_removed(event)
   if not worm_id then return end
   local worm = global.worms[worm_id]
   if not worm then return end
+  if worm.dying then return end  -- prevent infinite loop (since this function may call .die)
+  worm.dying = true
 
-  global.segment_to_worm_id[worm_id] = nil
-  worm.head.destroy{raise_destroy=false}
-  for _, segment in pairs(worm.segments) do
-    if segment.entity.valid then
-      global.segment_to_worm_id[segment.entity.unit_number] = nil
-      segment.entity.destroy{raise_destroy=false}
+  ---@param entity LuaEntity
+  local kill_func = function(entity)
+    -- if not entity.valid then return end
+    global.segment_to_worm_id[entity.unit_number] = nil  -- deregister
+    if entity.unit_number == event.entity.unit_number then return end  -- already dying
+    if event.name == defines.events.on_entity_died then
+      if event.force then
+        if event.cause then
+          entity.die(event.force, event.cause)
+        else
+          entity.die(event.force)
+        end
+      else
+        entity.die()  -- reasonably sure it won't fire with a cause but no force, since force == cause.force
+      end
+    else  -- mined or script_raised_destroy
+      entity.destroy{raise_destroy=false}
     end
+  end
+
+  kill_func(worm.head)
+  for _, segment in pairs(worm.segments) do
+    kill_func(segment.entity)
   end
 
   if worm.debug.path_points then
@@ -271,8 +291,9 @@ function Worm.on_entity_removed(event)
       rendering.destroy(id)
     end
   end
+  -- other rendering objects have target=entity, so will be automatically destroyed
 
-  global.worms[worm_id] = nil
+  global.worms[worm_id] = nil  -- should be the only reference to worm, so it'll be GCed
 
 end
 script.on_event(defines.events.on_entity_died, Worm.on_entity_removed, head_segment_filter)
@@ -454,6 +475,7 @@ function Worm.request_path(worm, target_position, radius)
 end
 
 --- Process asynchronous pathfinder response
+---@param event EventData.on_script_path_request_finished
 function Worm.set_target_path(event)
   local worm = global.worms[global.pathfinder_requests[event.id]]
   global.pathfinder_requests[event.id] = nil
@@ -621,6 +643,7 @@ end
 
 
 --- Emulate "distractions" by hooking to on_entity_damaged
+---@param event EventData.on_entity_damaged
 function Worm.on_entity_damaged(event)
   if not event.entity or not event.entity.valid then return end
   local worm_id = global.segment_to_worm_id[event.entity.unit_number]
