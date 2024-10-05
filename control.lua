@@ -59,12 +59,15 @@ end)
 
 -- Some type annotations for dev. Does not get enforced at runtime
 
+---@alias Size "small"|"medium"|"big"|"behemoth"
+---@alias Mode "idle"|"direct_position"|"direct_entity"|"path"|"reposition"
+
 ---@class Worm worm object
 ---@field id integer head.unit_number
 ---@field size Size size {"small", "medium", "big", "behemoth"}
 ---@field head LuaEntity "worm-head" entity
 ---@field segments Segment[] array of worm segments
----@field mode string mode {"idle", "direct_position", "direct_entity", "path"}, default "idle"
+---@field mode Mode AI mode
 ---@field target_position MapPosition? must exist for direct_position, could exist for path
 ---@field target_entity LuaEntity? must exist for direct_entity, could exist for path
 ---@field target_path Path table containing path info
@@ -86,8 +89,6 @@ end)
 ---@field pending_pathfinder_tick integer? latest request tick (for cooldown)
 ---@field pending_position MapPosition? to fill in target_position if request is successful, and for retry
 ---@field pending_radius number? for retry
-
----@alias Size "small"|"medium"|"big"|"behemoth"
 
 
 local Worm = {}
@@ -568,28 +569,30 @@ end
 ---@param worm Worm
 ---@return defines.riding.acceleration
 function Worm.get_acceleration(worm)
-  if worm.mode == "direct_entity" or worm.mode == "direct_position" or worm.mode == "path" then
-    -- Accelerate up to target_speed
-    if worm.head.speed < WormStats[worm.size].target_speed then
-      return defines.riding.acceleration.accelerating
-    end
-    return defines.riding.acceleration.nothing
+  -- Accelerate up to target_speed
+  if worm.mode ~= "idle" and worm.head.speed < WormStats[worm.size].target_speed then
+    return defines.riding.acceleration.accelerating
   end
   return defines.riding.acceleration.nothing
 end
 
---- Return target position, for Worm.get_direction. No validity checking
+--- Return current target orientation, for Worm.get_direction. No validity checking
 ---@param worm Worm
----@return MapPosition
-function Worm.get_target_position(worm)
+---@return number orientation
+function Worm._get_target_orientation(worm)
+  local target_position = nil
   if worm.mode == "path" then
-    return worm.target_path.path[worm.target_path.idx].position
+    target_position = worm.target_path.path[worm.target_path.idx].position
   elseif worm.mode == "direct_position" then
-    return worm.target_position
+    target_position = worm.target_position
   elseif worm.mode == "direct_entity" then
-    return worm.target_entity.position
+    target_position = worm.target_entity.position
   end
-  return {0, 0}
+  if target_position then
+    return Util.vector_to_orientation(worm.head.position, target_position)
+  else
+    return worm.head.orientation
+  end
 end
 
 --- Return riding_state direction. No validity checking
@@ -600,8 +603,7 @@ function Worm.get_direction(worm)
     return defines.riding.direction.straight
   end
   if worm.mode == "direct_entity" or worm.mode == "direct_position" or worm.mode == "path" then
-    local target_position = Worm.get_target_position(worm)
-    local delta = Util.delta_orientation(Util.vector_to_orientation(worm.head.position, target_position), worm.head.orientation)
+    local delta = Util.delta_orientation(Worm._get_target_orientation(worm), worm.head.orientation)
     if math.abs(delta) >= 0.5 * worm.head.prototype.rotation_speed * Worm.HEAD_UPDATE_FREQ then
       if delta < 0 then
         return defines.riding.direction.left
@@ -664,39 +666,85 @@ end
 script.on_event(defines.events.on_entity_damaged, Worm.on_entity_damaged, head_segment_filter)
 
 
+---@param worm Worm
+---@return MapPosition? position
+function Worm.get_target_position(worm)
+  -- target_entity takes priority
+  if worm.target_entity and worm.target_entity.valid then
+    return worm.target_entity.position
+  end
+  return worm.target_position
+end
+
+
 --- Logic for worm heads, the only 'smart' part of a worm
 ---@param worm Worm
 function Worm.update_head(worm)
   if worm.head.force.name ~= "enemy" then return end
+  if worm.mode == "idle" then
+    worm.head.riding_state = {
+      acceleration = defines.riding.acceleration.nothing,
+      direction = defines.riding.direction.straight,
+    }
+    return
+  end
 
-  -- TODO: auto set targets
-
-  -- check whether the worm should repath, eg reached target, or invalid target (which might mean successfully destroyed)
+  -- check whether the worm should repath; generally if reached target
   local repath = false
-  -- invalid target
-  if worm.mode == "direct_entity" then
-    if not worm.target_entity.valid then
-      repath = true
-    else
-      local dist = Util.dist(worm.head.position, worm.target_entity.position)
-      if dist < WormStats[worm.size].target_speed * Worm.HEAD_UPDATE_FREQ or dist > 1.2 * WormStats[worm.size].range then  -- buffer to prevent instant retargetting
-        repath = true
-      end
-    end
-  elseif worm.mode == "direct_position" or worm.mode == "path" then
-    -- path mode also has target_position set. But usually, path mode should've switched to direct mode already
-    if Util.dist(worm.head.position, worm.target_position) < WormStats[worm.size].target_speed * Worm.HEAD_UPDATE_FREQ then
+  local target_position = Worm.get_target_position(worm)
+  local dist = nil
+  if target_position then
+    dist = Util.dist(worm.head.position, target_position)
+    -- if reached target position (within a threshold)
+    if dist < WormStats[worm.size].target_speed * Worm.HEAD_UPDATE_FREQ then
       repath = true
     end
+    -- lose target if it moves too far away, with 1.2 buffer to prevent instant retargetting
+    if worm.mode == "direct_entity" and dist > 1.2 * WormStats[worm.size].range then
+      repath = true
+    end
+  else  -- not target_position
+    repath = true
   end
   if repath then
     Worm.set_idle(worm)  -- idle while waiting for pathfinder request
     local target_entity = worm.head.surface.find_nearest_enemy{  -- is_military_target only
       position = worm.head.position,
       max_distance = WormStats[worm.size].range,
-      force = worm.head.force,  -- finds enemy of enemy, ie player structures
+      force = worm.head.force,  -- finds enemy of this force
     }
     if target_entity then Worm.set_target_entity(worm, target_entity) end
+    target_position = Worm.get_target_position(worm)
+    dist = target_position and Util.dist(worm.head.position, target_position)
+  end
+
+  if target_position and (worm.mode == "direct_position" or worm.mode == "direct_entity") then  -- calculated above
+    -- if in direct mode but stuck in orbit, switch to reposition mode, which just drives straight
+    if dist < WormStats[worm.size].turn_radius then  -- closer than turn_radius
+      local disp_ori = Util.vector_to_orientation(worm.head.position, target_position)
+      local delta = Util.delta_orientation(disp_ori, worm.head.orientation)
+      if math.abs(delta) > 0.25 then  -- and moving away
+        worm.mode = "reposition"
+      end
+    end
+  end
+  if worm.mode == "reposition" then
+    if worm.target_entity and worm.target_entity.valid and (
+          (worm.target_entity.speed and worm.target_entity.speed > 0) or
+          (worm.target_entity.name == "character" and worm.target_entity.walking_state and worm.target_entity.walking_state.walking)
+        ) then
+      -- dont do reposition mode if the target entity is moving (eg a running player), otherwise it looks wierd
+      worm.mode = "direct_entity"
+    elseif dist > 1.45 * WormStats[worm.size].turn_radius then  -- thresh = sqrt2
+      -- if done repositioning, change back to direct mode
+      if worm.target_entity and worm.target_entity.valid then
+        worm.mode = "direct_entity"
+      elseif worm.target_position then
+        worm.mode = "direct_position"
+      else
+        Worm.set_idle(worm)
+      end
+    end
   end
 
   if worm.mode == "path" then
@@ -714,6 +762,7 @@ function Worm.update_head(worm)
       Worm.pop_path(worm)
     end
   end
+
 
   worm.head.riding_state = {
     acceleration = Worm.get_acceleration(worm),
