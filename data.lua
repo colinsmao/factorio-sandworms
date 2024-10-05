@@ -24,20 +24,29 @@ local function make_head(size, stats)
     icon = "__base__/graphics/icons/"..size.."-worm.png",  -- use vanilla worm icon for now, TODO
     icon_size = 64, icon_mipmaps = 4,
     flags = {"placeable-player", "placeable-enemy", "placeable-off-grid", "not-repairable", "breaths-air"},
-    immune_to_tree_impacts = true,
-    immune_to_rock_impacts = true,
-    inventory_size = 0,
+    subgroup="enemies",
 
     -- inherited from "tank"
     minable = {mining_time = 0.5, result = size.."-worm-head"},
     mined_sound = sounds.deconstruct_large(0.8),
-    corpse = "tank-remnants",
-    dying_explosion = "tank-explosion",
+    -- corpse = "tank-remnants",
+    -- dying_explosion = "tank-explosion",
     alert_icon_shift = util.by_pixel(0, -13),
-    damaged_trigger_effect = hit_effects.entity(),
+    -- damaged_trigger_effect = hit_effects.entity(),
     vehicle_impact_sound = sounds.generic_impact,
     track_particle_triggers = movement_triggers.tank,
+    tank_driving = true,
+    immune_to_tree_impacts = true,
+    immune_to_rock_impacts = true,
 
+    -- inherited from vanilla worms
+    damaged_trigger_effect = hit_effects.biter(),
+    corpse = size.."-worm-corpse",
+    dying_explosion = size.."-worm-die",
+    dying_sound = data.raw["turret"][size.."-worm-turret"].dying_sound,
+
+    -- vehicle stats
+    inventory_size = 0,
     friction = 1e-200,  -- minimal friction; tank = 0.002
     terrain_friction_modifier = 0.0,
     energy_source = {type = "void"},
@@ -50,7 +59,6 @@ local function make_head(size, stats)
     rotation_speed = stats.rotation_speed,  -- tank = 0.0035
     weight = 20000 * stats.scale^3,  -- tank = 20000
     energy_per_hit_point = 0.05,  -- tank = 0.5
-    tank_driving = true,
 
     is_military_target = true,  -- will be targeted by turrets
     resistances =
@@ -143,6 +151,7 @@ local function make_segment(size, worm_head)
   local worm_segment = table.deepcopy(worm_head)
   worm_segment.name = size.."-worm-segment"
   worm_segment.is_military_target = false
+  worm_segment.corpse = nil
   return worm_segment
 end
 

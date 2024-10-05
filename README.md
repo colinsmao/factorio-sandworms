@@ -22,7 +22,10 @@ Explosion damage (x6 tech, ie pre-infinite): Grenade 78.75, Landmine 500, Rocket
 ---
 
 TODO:
-- Graphics, of all forms (eg worm, particles, etc). Not an artist
+- Graphics, of all forms. Not an artist
+  - Worm head+segment art. Corpses. Movement particles.
+  - Spawn/despawn animations, eg burrowing into the ground
+- Balancing. Some basic balancing done (eg health, speed), but not really tested in real scenarios
 - Idle worms sitting and/or moving around. Since worms are controlled via script, this seems like it could become inefficient.
 
 Issues:
