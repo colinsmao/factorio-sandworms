@@ -2,20 +2,9 @@
 local hit_effects = require("__base__/prototypes/entity/hit-effects.lua")
 local sounds = require("__base__/prototypes/entity/sounds.lua")
 local movement_triggers = require("__base__/prototypes/entity/movement-triggers.lua")
-
--- avoid collision with cliffs, and self
 local collision_mask_util = require("__core__/lualib/collision-mask-util")
-local collision_mask = collision_mask_util.get_mask(data.raw["cliff"]["cliff"])
-table.insert(collision_mask, collision_mask_util.get_first_unused_layer())
-data.raw["cliff"]["cliff"].collision_mask = collision_mask
 
 local WormStats = require("worm-stats")
-base_collision_box = {{-1.3, -0.9}, {1.3, 0.9}}
-base_selection_box = {{-1.3, -0.9}, {1.3, 0.9}}
-base_drawing_box = {{-1.8, -1.8}, {1.8, 1.5}}
-local function scale_all(box, scale)
-  return {{box[1][1]*scale, box[1][2]*scale}, {box[2][1]*scale, box[2][2]*scale}}
-end
 
 local function make_head(size, stats)
   local worm_head = {
@@ -65,7 +54,7 @@ local function make_head(size, stats)
     {
       {
         type = "impact",
-        percent = 75
+        percent = 90
       },
       {
         type = "explosion",
@@ -99,16 +88,16 @@ local function make_head(size, stats)
     -- damaged_trigger_effect = {
     --   type = "script",
     --   effect_id = "worm-damaged"
-    -- }
+    -- },
     -- crash_trigger = {
     --   type = "script",
     --   effect_id = "worm-crashed"
-    -- }
+    -- },
 
-    collision_mask = collision_mask,
-    collision_box = scale_all(base_collision_box, stats.scale),
-    selection_box = scale_all(base_selection_box, stats.scale),
-    drawing_box = scale_all(base_drawing_box, stats.scale),
+    collision_mask = collision_mask_util.get_default_mask("unit"),
+    collision_box = stats.collision_box,
+    selection_box = stats.selection_box,
+    drawing_box = stats.drawing_box,
     animation =
     {
       priority = "low",
@@ -184,8 +173,8 @@ local function make_item_recipe(size)
   return {worm_head_item, worm_head_recipe}
 end
 
-for size, stats in pairs(WormStats) do
-  local head_prototype = make_head(size, stats)
+for _, size in pairs(WormStats.SIZES) do
+  local head_prototype = make_head(size, WormStats[size])
   local segment_prototype = make_segment(size, head_prototype)
   data:extend({head_prototype, segment_prototype})
   data:extend(make_item_recipe(size))
