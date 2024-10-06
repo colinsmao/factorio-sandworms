@@ -278,3 +278,27 @@ function Worm.update_segment(segment)
     segment.entity.orientation = Util.vector_to_orientation(disp)
   end
 end
+
+
+local ent_filter = Worm.size_map(function(size) return {size.."-worm-head"} end)  -- , size.."-worm-segment"
+--- debug update labels
+function Worm.update_labels(tickdata)
+  global.labels = global.labels or {}
+  for _, label in pairs(global.labels) do
+    rendering.destroy(label)
+  end
+  global.labels = {}
+  local player = game.get_player(1)
+  if not player then return end
+  for _, ent in pairs(player.surface.find_entities_filtered{name=ent_filter}) do
+    table.insert(global.labels, rendering.draw_text{
+      text = ent.speed * 60,
+      surface = player.surface,
+      target = ent,  -- rendering object will be destroyed automatically when the entity is destroyed
+      target_offset = {0, 1},
+      color = {1, 1, 1}
+    })
+  end
+end
+script.on_nth_tick(6, Worm.update_labels)
+

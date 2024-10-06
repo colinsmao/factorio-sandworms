@@ -1,4 +1,5 @@
 
+local WormStats = require("worm-stats")
 local Util = {}
 
 --- Return the squared distance between two positions
@@ -36,8 +37,7 @@ function Util.delta_orientation(target, origin)
 end
 
 
-local WormStats = require("worm-stats")
-
+local debug_flag = false
 script.on_init(function()
   ---@type { [integer]: Worm } worm_id: worm
   global.worms = global.worms or {}
@@ -45,6 +45,7 @@ script.on_init(function()
   global.segment_to_worm_id = global.segment_to_worm_id or {}
   ---@type { [integer]: integer } pathfinder_id: worm_id
   global.pathfinder_requests = global.pathfinder_requests or {}
+  debug_flag = settings.global["debug"].value
 end)
 
 script.on_configuration_changed(function()  -- only for testing, because the format of global could change
@@ -54,6 +55,7 @@ script.on_configuration_changed(function()  -- only for testing, because the for
   global.segment_to_worm_id = global.segment_to_worm_id or {}
   ---@type { [integer]: integer } pathfinder_id: worm_id
   global.pathfinder_requests = global.pathfinder_requests or {}
+  debug_flag = settings.global["debug"].value
 end)
 
 
@@ -148,16 +150,9 @@ function Worm._new(head)
     dying = false,
     debug = {},
   }
-  worm.debug.range = rendering.draw_circle{
-    color = {r=1, g=0, b=0, a=0.001},
-    radius = WormStats[worm.size].range,
-    width = 3,
-    target = head,
-    surface = head.surface,
-    draw_on_ground = true,
-  }
   global.worms[worm.id] = worm
   global.segment_to_worm_id[head.unit_number] = worm.id  -- register
+  if debug_flag then Worm._draw_range(worm) end
   return worm
 end
 
@@ -219,6 +214,8 @@ function Worm.create_worm_with_orientation(surface, force, size, position, orien
   return worm
 end
 
+
+--- Creates a body for a manually placed worm (for debugging only, as otherwise there is no worm item to place)
 ---@param event EventData.on_built_entity|EventData.script_raised_built|EventData.on_entity_cloned
 function Worm.on_entity_created(event)
   local entity
@@ -246,6 +243,8 @@ script.on_event(defines.events.script_raised_built, Worm.on_entity_created, head
 script.on_event(defines.events.script_raised_revive, Worm.on_entity_created, head_filter)
 script.on_event(defines.events.on_entity_cloned, Worm.on_entity_created, head_filter)
 
+
+--- Kills all other segments if a single segment/head dies
 ---@param event EventData.on_entity_died
 function Worm.on_entity_removed(event)
   if not event.entity or not event.entity.valid then return end
@@ -282,17 +281,10 @@ function Worm.on_entity_removed(event)
     kill_func(segment.entity)
   end
 
-  if worm.debug.path_points then
-    for _, id in pairs(worm.debug.path_points) do
-      rendering.destroy(id)
-    end
+  if debug_flag then
+    Worm._destroy_path_rendering(worm)
+    -- since other rendering objects have target=entity, they will be automatically destroyed
   end
-  if worm.debug.path_segments then
-    for _, id in pairs(worm.debug.path_segments) do
-      rendering.destroy(id)
-    end
-  end
-  -- other rendering objects have target=entity, so will be automatically destroyed
 
   global.worms[worm_id] = nil  -- should be the only reference to worm, so it'll be GCed
 
@@ -361,32 +353,74 @@ script.on_event("left-click", function(event)
   end
 end)
 
-local ent_filter = Worm.size_map(function(size) return {size.."-worm-head"} end)  -- , size.."-worm-segment"
---- debug update labels
-function Worm.update_labels(tickdata)
-  global.labels = global.labels or {}
-  for _, label in pairs(global.labels) do
-    rendering.destroy(label)
-  end
-  global.labels = {}
-  local player = game.get_player(1)
-  if not player then return end
-  for _, ent in pairs(player.surface.find_entities_filtered{name=ent_filter}) do
-    table.insert(global.labels, rendering.draw_text{
-      text = ent.speed * 60,
-      surface = player.surface,
-      target = ent,  -- rendering object will be destroyed automatically when the entity is destroyed
-      target_offset = {0, 1},
-      color = {1, 1, 1}
-    })
+
+--- debug update rendering objects
+---@param worm Worm
+function Worm.update_rendering(worm)
+  if not debug_flag then return end
+  if worm.mode == "path" then
+    Worm._draw_direct_rendering(worm, worm.target_position)
+    Worm._draw_path_rendering(worm)
+  elseif worm.mode == "direct_position" then
+    Worm._destroy_path_rendering(worm)
+    Worm._draw_direct_rendering(worm, worm.target_position)
+  elseif worm.mode == "direct_entity" then
+    Worm._destroy_path_rendering(worm)
+    Worm._draw_direct_rendering(worm, worm.target_entity)
+  elseif worm.mode == "idle" then
+    Worm._destroy_path_rendering(worm)
+    Worm._destroy_direct_rendering(worm)
   end
 end
-script.on_nth_tick(6, Worm.update_labels)
 
-
---- debug destroy path segments
 ---@param worm Worm
-function Worm.destroy_path_rendering(worm)
+function Worm._draw_path_rendering(worm)
+  Worm._destroy_path_rendering(worm)
+  worm.debug.path_points = {}
+  worm.debug.path_segments = {}
+  local prev_pos = worm.head.position
+  for i, pathpoint in pairs(worm.target_path.path) do
+    local color
+    if i < worm.target_path.idx then
+      color = {r=0,g=0,b=64,a=0.01}
+    elseif i > worm.target_path.idx then
+      color = {r=0,g=64,b=0,a=0.01}
+    else  -- i == idx
+      color = {r=64,g=0,b=0,a=0.01}
+    end
+    table.insert(worm.debug.path_segments, rendering.draw_line{
+      color = color,
+      width = 3,
+      from = prev_pos,
+      to = pathpoint.position,
+      surface = worm.head.surface,
+    })
+    table.insert(worm.debug.path_points, rendering.draw_circle{
+      color = color,
+      radius = 0.5,
+      filled = true,
+      target = pathpoint.position,
+      surface = worm.head.surface,
+    })
+    prev_pos = pathpoint.position
+  end
+end
+
+---@param worm Worm
+---@param idx integer worm.target_path.idx (post increment)
+function Worm.increment_path_rendering(worm, idx)
+  if worm.debug.path_points then
+    rendering.set_color(worm.debug.path_points[idx - 1], {r=0,g=0,b=64,a=0.01})
+    rendering.set_color(worm.debug.path_points[idx], {r=64,g=0,b=0,a=0.01})
+  end
+  if worm.debug.path_segments then
+    rendering.set_color(worm.debug.path_segments[idx - 1], {r=0,g=0,b=64,a=0.01})
+    rendering.set_color(worm.debug.path_segments[idx], {r=64,g=0,b=0,a=0.01})
+  end
+end
+
+---@param worm Worm
+function Worm._destroy_path_rendering(worm)
   if worm.debug.path_points then
     for _, id in pairs(worm.debug.path_points) do
       rendering.destroy(id)
@@ -401,12 +435,11 @@ function Worm.destroy_path_rendering(worm)
   worm.debug.path_segments = nil
 end
 
--- debug draw or update direct path
 ---@param worm Worm
 ---@param target MapPosition|LuaEntity
-function Worm.draw_direct_path(worm, target)
-  if not worm.debug.path_direct or not rendering.is_valid(worm.debug.path_direct) then
-    worm.debug.path_direct = rendering.draw_line{
+function Worm._draw_direct_rendering(worm, target)
+  if not worm.debug.direct_line or not rendering.is_valid(worm.debug.direct_line) then
+    worm.debug.direct_line = rendering.draw_line{
       color = {r=0,g=64,b=0,a=0.01},
       width = 3,
       from = worm.head,
@@ -414,10 +447,54 @@ function Worm.draw_direct_path(worm, target)
       surface = worm.head.surface,
     }
   else
-    -- rendering.set_from(worm.debug.path_direct, worm.head)
-    rendering.set_to(worm.debug.path_direct, target)
+    rendering.set_to(worm.debug.direct_line, target)  -- assume from is worm.head already
   end
 end
+
+---@param worm Worm
+function Worm._destroy_direct_rendering(worm)
+  if worm.debug.direct_line then
+    rendering.destroy(worm.debug.direct_line)
+    worm.debug.direct_line = nil
+  end
+end
+
+---@param worm Worm
+function Worm._draw_range(worm)
+  worm.debug.range = rendering.draw_circle{
+    color = {r=1, g=0, b=0, a=0.001},
+    radius = WormStats[worm.size].range,
+    width = 2,
+    target = worm.head,
+    surface = worm.head.surface,
+    draw_on_ground = true,
+  }
+end
+
+---@param worm Worm
+function Worm._destroy_range(worm)
+  if worm.debug.range then
+    rendering.destroy(worm.debug.range)
+  end
+end
+
+script.on_event(defines.events.on_runtime_mod_setting_changed, function(event)
+  if event.setting ~= "debug" then return end
+  debug_flag = settings.global["debug"].value
+  if debug_flag then
+    for _, worm in pairs(global.worms) do
+      Worm.update_rendering(worm)
+      Worm._draw_range(worm)
+    end
+  else
+    for _, worm in pairs(global.worms) do
+      Worm._destroy_direct_rendering(worm)
+      Worm._destroy_path_rendering(worm)
+      Worm._destroy_range(worm)
+    end
+  end
+end)
+
 
 --- Set target position, with pathfinding request if necessary.
 ---@param worm Worm
@@ -496,33 +573,7 @@ function Worm.set_target_path(event)
   worm.target_path.pending_pathfinder_tick = nil
   worm.target_position = worm.target_path.pending_position
 
-  -- debug path rendering
-
-  Worm.draw_direct_path(worm, worm.target_position)
-  Worm.destroy_path_rendering(worm)
-  worm.debug.path_points = {}
-  worm.debug.path_segments = {}
-  local prev_pos = worm.head.position
-  for _, pathpoint in pairs(worm.target_path.path) do
-    table.insert(worm.debug.path_segments, rendering.draw_line{
-      color = {r=0,g=64,b=0,a=0.01},
-      width = 3,
-      from = prev_pos,
-      to = pathpoint.position,
-      surface = worm.head.surface,
-    })
-    table.insert(worm.debug.path_points, rendering.draw_circle{
-      color = {r=0,g=64,b=0,a=0.01},
-      radius = 0.5,
-      filled = true,
-      target = pathpoint.position,
-      surface = worm.head.surface,
-    })
-    prev_pos = pathpoint.position
-  end
-  rendering.set_color(worm.debug.path_points[worm.target_path.idx], {r=0,g=0,b=64,a=0.01})
-  rendering.set_color(worm.debug.path_segments[worm.target_path.idx], {r=0,g=0,b=64,a=0.01})
-
+  if debug_flag then Worm.update_rendering(worm) end
 end
 script.on_event(defines.events.on_script_path_request_finished, Worm.set_target_path)
 
@@ -533,11 +584,8 @@ function Worm.set_idle(worm)
   worm.target_position = nil
   worm.target_entity = nil
   worm.target_path.valid = false
-  if worm.debug.path_direct then
-    rendering.destroy(worm.debug.path_direct)
-    worm.debug.path_direct = nil
-  end
-  Worm.destroy_path_rendering(worm)
+
+  if debug_flag then Worm.update_rendering(worm) end
 end
 
 --- Set direct position target
@@ -548,8 +596,8 @@ function Worm.set_direct_position(worm, position)
   worm.target_position = position
   worm.target_entity = nil
   worm.target_path.valid = false
-  Worm.destroy_path_rendering(worm)
-  Worm.draw_direct_path(worm, position)
+
+  if debug_flag then Worm.update_rendering(worm) end
 end
 
 --- Set direct entity target
@@ -560,8 +608,8 @@ function Worm.set_direct_entity(worm, entity)
   worm.target_position = nil
   worm.target_entity = entity
   worm.target_path.valid = false
-  Worm.destroy_path_rendering(worm)
-  Worm.draw_direct_path(worm, entity)
+
+  if debug_flag then Worm.update_rendering(worm) end
 end
 
 
@@ -628,15 +676,8 @@ function Worm.pop_path(worm)
     -- The length of two tangents from a circle to their intersection, at angle theta. clip to prevent nan
     local dist_thresh = WormStats[worm.size].turn_radius / math.max(0.1, math.abs(math.tan(theta * math.pi)))
     if Util.dist(worm.head.position, worm.target_path.path[worm.target_path.idx].position) < dist_thresh then
-      if worm.debug.path_points then
-        rendering.set_color(worm.debug.path_points[worm.target_path.idx], {r=0,g=0,b=64,a=0.01})
-        rendering.set_color(worm.debug.path_points[worm.target_path.idx + 1], {r=64,g=0,b=0,a=0.01})
-      end
-      if worm.debug.path_segments then
-        rendering.set_color(worm.debug.path_segments[worm.target_path.idx], {r=0,g=0,b=64,a=0.01})
-        rendering.set_color(worm.debug.path_segments[worm.target_path.idx + 1], {r=64,g=0,b=0,a=0.01})
-      end
       worm.target_path.idx = worm.target_path.idx + 1
+      if debug_flag then Worm.increment_path_rendering(worm, worm.target_path.idx) end
     else
       break
     end
@@ -756,13 +797,11 @@ function Worm.update_head(worm)
     if Util.dist(worm.head.position, worm.target_path.path[#worm.target_path.path].position) < 3 * WormStats[worm.size].turn_radius then
       -- If almost there, switch to direct_position mode
       Worm.set_direct_position(worm, worm.target_position)
-      Worm.destroy_path_rendering(worm)
     else
       -- Pop completed points
       Worm.pop_path(worm)
     end
   end
-
 
   worm.head.riding_state = {
     acceleration = Worm.get_acceleration(worm),
