@@ -62,7 +62,7 @@ end)
 -- Some type annotations for dev. Does not get enforced at runtime
 
 ---@alias Size "small"|"medium"|"big"|"behemoth"
----@alias Mode "idle"|"direct_position"|"direct_entity"|"path"|"reposition"
+---@alias Mode "idle"|"direct_position"|"direct_entity"|"path"|"reposition"|"stop"
 
 ---@class Worm worm object
 ---@field id integer head.unit_number
@@ -103,6 +103,7 @@ if Worm.HEAD_UPDATE_FREQ == Worm.SEGMENT_UPDATE_FREQ then
 end
 Worm.PATHFINDER_COOLDOWN = 1  -- ticks; cooldown between pathfinder requests
 Worm.PATHFINDER_MAX_RETRY = 3  -- int; max retries per pathfinder target
+---@type Size[]
 Worm.SIZES = {"small", "medium", "big", "behemoth"}
 
 --- union of func(size) for each size; eg {size.."-worm-head"}
@@ -301,8 +302,10 @@ script.on_event("left-click", function(event)
   local cursor_stack = player.cursor_stack
   if not cursor_stack or not cursor_stack.valid_for_read then return end
   if cursor_stack.name == "iron-plate" then
-    game.print(event.cursor_position)
-    Worm.update_labels(nil)  -- refresh annotations
+    -- game.print(event.cursor_position)
+    for _, worm in pairs(global.worms) do
+      Worm.burrow(worm)
+    end
   elseif cursor_stack.name == "copper-plate" then
     -- path to click
     global.target_entity = player.surface.find_nearest_enemy{
@@ -367,7 +370,7 @@ function Worm.update_rendering(worm)
   elseif worm.mode == "direct_entity" then
     Worm._destroy_path_rendering(worm)
     Worm._draw_direct_rendering(worm, worm.target_entity)
-  elseif worm.mode == "idle" then
+  elseif worm.mode == "idle" or worm.mode == "stop" then
     Worm._destroy_path_rendering(worm)
     Worm._destroy_direct_rendering(worm)
   end
@@ -588,6 +591,17 @@ function Worm.set_idle(worm)
   if debug_flag then Worm.update_rendering(worm) end
 end
 
+--- Set mode to stop
+---@param worm Worm
+function Worm.set_stop(worm)
+  worm.mode = "stop"
+  worm.target_position = nil
+  worm.target_entity = nil
+  worm.target_path.valid = false
+
+  if debug_flag then Worm.update_rendering(worm) end
+end
+
 --- Set direct position target
 ---@param worm Worm
 ---@param position MapPosition
@@ -613,12 +627,32 @@ function Worm.set_direct_entity(worm, entity)
 end
 
 
+--- Burrow, ie disappear and become a worm turret
+---@param worm Worm
+function Worm.burrow(worm)
+  local surface = worm.head.surface
+  local size = worm.size
+  local position = worm.head.position
+  local force = worm.head.force
+  local health_ratio = worm.head.get_health_ratio()
+  worm.head.destroy{raise_destroy=true}
+  local worm_turret = surface.create_entity{
+    name = size.."-worm-turret",
+    position = position,
+    force = force
+  }
+  worm_turret.health = math.max(1, health_ratio * game.entity_prototypes[size.."-worm-turret"].max_health)
+end
+
+
 --- Return riding_state acceleration. No validity checking
 ---@param worm Worm
 ---@return defines.riding.acceleration
 function Worm.get_acceleration(worm)
   -- Accelerate up to target_speed
-  if worm.mode ~= "idle" and worm.head.speed < WormStats[worm.size].target_speed then
+  if worm.mode == "stop" then
+    return defines.riding.acceleration.braking
+  elseif worm.mode ~= "idle" and worm.head.speed < WormStats[worm.size].target_speed then
     return defines.riding.acceleration.accelerating
   end
   return defines.riding.acceleration.nothing
@@ -728,6 +762,16 @@ function Worm.update_head(worm)
       direction = defines.riding.direction.straight,
     }
     return
+  elseif worm.mode == "stop" then
+    if worm.head.speed < 0.2 * WormStats[worm.size].target_speed then
+      Worm.burrow(worm)
+    else
+      worm.head.riding_state = {
+        acceleration = defines.riding.acceleration.braking,
+        direction = defines.riding.direction.straight,
+      }
+    end
+    return
   end
 
   -- check whether the worm should repath; generally if reached target
@@ -754,9 +798,13 @@ function Worm.update_head(worm)
       max_distance = WormStats[worm.size].range,
       force = worm.head.force,  -- finds enemy of this force
     }
-    if target_entity then Worm.set_target_entity(worm, target_entity) end
-    target_position = Worm.get_target_position(worm)
-    dist = target_position and Util.dist(worm.head.position, target_position)
+    if target_entity then
+      Worm.set_target_entity(worm, target_entity)
+      target_position = Worm.get_target_position(worm)
+      dist = target_position and Util.dist(worm.head.position, target_position)
+    else
+      Worm.set_stop(worm)
+    end
   end
 
   if target_position and (worm.mode == "direct_position" or worm.mode == "direct_entity") then  -- calculated above
@@ -784,6 +832,16 @@ function Worm.update_head(worm)
         worm.mode = "direct_position"
       else
         Worm.set_idle(worm)
+        local target_entity = worm.head.surface.find_nearest_enemy{  -- is_military_target only
+          position = worm.head.position,
+          max_distance = WormStats[worm.size].range,
+          force = worm.head.force,  -- finds enemy of this force
+        }
+        if target_entity then
+          Worm.set_target_entity(worm, target_entity)
+        else
+          Worm.set_stop(worm)
+        end
       end
     end
   end
