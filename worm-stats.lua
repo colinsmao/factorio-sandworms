@@ -38,6 +38,9 @@ local function scale_all(box, scale)
   return {{box[1][1]*scale, box[1][2]*scale}, {box[2][1]*scale, box[2][2]*scale}}
 end
 
+base_segment_step = 2  -- tiles; separation between segments (will be scaled)
+base_worm_length = 10  -- length of worm in segments (not counting head)
+
 -- shared worm stats used by both data.lua and control.lua
 local WormStats = {
   SIZES = {"small", "medium", "big", "behemoth"},
@@ -79,6 +82,9 @@ for _, size in pairs(WormStats.SIZES) do
   stats.collision_box = scale_all(base_collision_box, stats.scale)
   stats.selection_box = scale_all(base_selection_box, stats.scale)
   stats.drawing_box = scale_all(base_drawing_box, stats.scale)
+  stats.segment_sep = base_segment_step * stats.scale
+  stats.worm_length = base_worm_length
+  stats.max_orientation = (stats.segment_sep / stats.target_speed) * stats.rotation_speed
 end
 
 return WormStats

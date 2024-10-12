@@ -45,7 +45,7 @@ script.on_init(function()
   global.segment_to_worm_id = global.segment_to_worm_id or {}
   ---@type { [integer]: integer } pathfinder_id: worm_id
   global.pathfinder_requests = global.pathfinder_requests or {}
-  debug_flag = settings.global["debug"].value
+  debug_flag = settings.global["debug-graphics"].value
 end)
 
 script.on_configuration_changed(function()  -- only for testing, because the format of global could change
@@ -55,7 +55,11 @@ script.on_configuration_changed(function()  -- only for testing, because the for
   global.segment_to_worm_id = global.segment_to_worm_id or {}
   ---@type { [integer]: integer } pathfinder_id: worm_id
   global.pathfinder_requests = global.pathfinder_requests or {}
-  debug_flag = settings.global["debug"].value
+  debug_flag = settings.global["debug-graphics"].value
+end)
+
+script.on_load(function()  -- only for testing, because the format of global could change
+  debug_flag = settings.global["debug-graphics"].value
 end)
 
 
@@ -75,12 +79,12 @@ end)
 ---@field target_path Path table containing path info
 ---@field accumulated_damage { [integer]: float } entity_id: accumulated damage taken
 ---@field dying boolean flag to prevent infinite loop during on_entity_died
+---@field stop_tick integer? earliest tick the worm has been stopped
 ---@field debug table debug info, mostly rendering ids
 
 ---@class Segment pair of segment entity and its before entity
 ---@field entity LuaEntity
 ---@field before LuaEntity
----@field separation number tiles
 
 ---@class Path table containing path info
 ---@field valid boolean if the path has been successfully requested
@@ -94,8 +98,6 @@ end)
 
 
 local Worm = {}
-Worm.WORM_LENGTH = 10  -- length of worm in segments (not counting head)
-Worm.BASE_SEGMENT_SEP = 2  -- tiles; separation between segments (will be scaled by speed)
 Worm.HEAD_UPDATE_FREQ = 10  -- ticks; update frequency for worm heads, which have pathfinding AI and stuff
 Worm.SEGMENT_UPDATE_FREQ = 2  -- ticks; update frequency for worm segments, which are dumb but more numerous
 if Worm.HEAD_UPDATE_FREQ == Worm.SEGMENT_UPDATE_FREQ then
@@ -159,17 +161,24 @@ end
 
 --- Create body (list of segments) for a worm
 ---@param worm Worm
+---@param variation? number worm body initial variation - 0 is straight, 1 is (up to) maximum curvature
 ---@return boolean success
-function Worm._create_body(worm)
-  local orientation = worm.head.orientation  -- [0, 1) clockwise, north=0
-  local sep = WormStats[worm.size].scale * Worm.BASE_SEGMENT_SEP
-  local displacement = {x=sep*math.sin(2*math.pi*orientation), y=-sep*math.cos(2*math.pi*orientation)}
-  local position = worm.head.position
+function Worm._create_body(worm, variation)
+  variation = variation or 0
+  local init_ori = (2 * math.random() - 1) * variation * WormStats[worm.size].max_orientation
+  local final_ori = (2 * math.random() - 1) * variation * WormStats[worm.size].max_orientation
+  local step = (final_ori - init_ori) / (WormStats[worm.size].worm_length - 1)
+
+  local pos_x, pos_y = worm.head.position.x, worm.head.position.y
+  local orientation = worm.head.orientation
   local before = worm.head
-  for i=1,Worm.WORM_LENGTH do
+  for i=1,WormStats[worm.size].worm_length do
+    orientation = (orientation + init_ori + step * (i-1)) % 1
+    pos_x = pos_x - WormStats[worm.size].segment_sep*math.sin(2*math.pi*orientation)
+    pos_y = pos_y + WormStats[worm.size].segment_sep*math.cos(2*math.pi*orientation)
     local segment = worm.head.surface.create_entity{
       name = worm.size.."-worm-segment",
-      position = {position.x - i * displacement.x, position.y - i * displacement.y},
+      position = {pos_x, pos_y},
       force = worm.head.force
     }
     if not segment then return false end
@@ -177,8 +186,7 @@ function Worm._create_body(worm)
     segment.speed = worm.head.speed
     table.insert(worm.segments, {
       entity = segment,
-      before = before,
-      separation = sep
+      before = before
     })
     global.segment_to_worm_id[segment.unit_number] = worm.id  -- register
     before = segment
@@ -193,7 +201,9 @@ end
 ---@param position MapPosition
 ---@param orientation number
 ---@return Worm?
-function Worm.create_worm_with_orientation(surface, force, size, position, orientation)
+function Worm.create_worm_with_orientation(surface, force, size, position, orientation, speed, variation)
+  speed = speed or WormStats[size].target_speed
+  variation = variation or 0
   local head = surface.create_entity{
     name = size.."-worm-head",
     position = position,
@@ -204,8 +214,8 @@ function Worm.create_worm_with_orientation(surface, force, size, position, orien
   if not head then return end
   local worm = Worm._new(head)
   worm.head.orientation = orientation
-  worm.head.speed = WormStats[size].target_speed
-  if not Worm._create_body(worm) then
+  worm.head.speed = speed
+  if not Worm._create_body(worm, variation) then
     worm.head.destroy{raise_destroy=true}  -- will also destroy any segments that were created
     return
   end
@@ -294,42 +304,30 @@ script.on_event(defines.events.script_raised_destroy, Worm.on_entity_removed, he
 
 
 script.on_event("left-click", function(event)
+  if not settings.global["debug-controls"].value then return end
   local player = game.get_player(event.player_index)
   if not player then return end
   local cursor_stack = player.cursor_stack
   if not cursor_stack or not cursor_stack.valid_for_read then return end
-  if cursor_stack.name == "iron-plate" then
-    -- game.print(event.cursor_position)
-    rendering.draw_circle{
-      color = {1,0,0},
-      radius = 4,
-      filled = false,
-      target = event.cursor_position,
-      surface = player.surface,
-      time_to_live = 60,
-    }
-    local entities = player.surface.find_entities_filtered{
-      position = event.cursor_position,
-      radius = 4,
-      type = "cliff"
-    }
-    for _, ent in pairs(entities) do
-      ent.destroy{do_cliff_correction=true}
-    end
-  elseif cursor_stack.name == "copper-plate" then
+  if cursor_stack.name == "copper-plate" then
     -- path to click
+    global.target_position = event.cursor_position
     global.target_entity = player.surface.find_nearest_enemy{
-      position = event.cursor_position,
-      max_distance = 8,
+      position = global.target_position,
+      max_distance = 4,
       force = "enemy",  -- finds enemy of enemy, ie player structures
     }
-    for _, worm in pairs(global.worms) do
-      if global.target_entity then
+    if global.target_entity then
+      global.target_position = nil  -- only keep one
+      for _, worm in pairs(global.worms) do
         Worm.set_target_entity(worm, global.target_entity)
-      else
-        Worm.set_target_position(worm, event.cursor_position, 1)
+      end
+    else
+      for _, worm in pairs(global.worms) do
+        Worm.set_target_position(worm, event.cursor_position)
       end
     end
+    if debug_flag then Worm._draw_target_rendering(player.surface) end
   elseif cursor_stack.name == "steel-plate" then
     -- destroy all worms
     for _, worm in pairs(global.worms) do
@@ -338,39 +336,69 @@ script.on_event("left-click", function(event)
   elseif cursor_stack.name == "plastic-bar" then
     local size = WormStats.SIZES[math.random(4)]
     local orientation = math.random()
+    local speed = 0
+    local target_position = global.target_position
     if global.target_entity and global.target_entity.valid then
-      orientation = Util.vector_to_orientation(event.cursor_position, global.target_entity.position)
+      target_position = global.target_entity.position
     end
-    local worm = Worm.create_worm_with_orientation(player.surface, "enemy", size, event.cursor_position, orientation)
+    if target_position then
+      orientation = Util.vector_to_orientation(event.cursor_position, target_position)
+      speed = WormStats[size].target_speed
+    end
+    local worm = Worm.create_worm_with_orientation(player.surface, "enemy", size, event.cursor_position, orientation, speed, 1)
     if not worm then return end
     if global.target_entity and global.target_entity.valid then
       Worm.set_target_entity(worm, global.target_entity)
+    elseif global.target_position then
+      Worm.set_target_position(worm, global.target_position)
     end
-  elseif cursor_stack.name == "iron-gear-wheel" then
-    -- check orientation sprites
-    local pos = event.cursor_position
-    for i=0,63 do
-      local head = player.surface.create_entity{
-        name = "big-worm-head",
-        position = {x = pos.x + (i%8) * 8, y = pos.y + math.floor(i/8) * 8},
-        force = "player",
-        create_build_effect_smoke = false,
-        raise_built = false,
-      }
-      if not head then return end
-      local worm = Worm._new(head)
-      worm.head.orientation = i/64
-    end
+  -- elseif cursor_stack.name == "iron-plate" then
+  --   -- game.print(event.cursor_position)
+  --   rendering.draw_circle{
+  --     color = {1,0,0},
+  --     radius = 4,
+  --     filled = false,
+  --     target = event.cursor_position,
+  --     surface = player.surface,
+  --     time_to_live = 60,
+  --   }
+  --   local entities = player.surface.find_entities_filtered{
+  --     position = event.cursor_position,
+  --     radius = 4,
+  --     type = "cliff"
+  --   }
+  --   for _, ent in pairs(entities) do
+  --     ent.destroy{do_cliff_correction=true}
+  --   end
+  -- elseif cursor_stack.name == "iron-gear-wheel" then
+  --   -- check orientation sprites
+  --   local pos = event.cursor_position
+  --   for i=0,63 do
+  --     local head = player.surface.create_entity{
+  --       name = "big-worm-head",
+  --       position = {x = pos.x + (i%8) * 8, y = pos.y + math.floor(i/8) * 8},
+  --       force = "player",
+  --       create_build_effect_smoke = false,
+  --       raise_built = false,
+  --     }
+  --     if not head then return end
+  --     local worm = Worm._new(head)
+  --     worm.head.orientation = i/64
+  --   end
   end
 end)
 
 script.on_event("right-click", function(event)
+  if not settings.global["debug-controls"].value then return end
   local player = game.get_player(event.player_index)
   if not player then return end
   local cursor_stack = player.cursor_stack
   if not cursor_stack or not cursor_stack.valid_for_read then return end
   if cursor_stack.name == "iron-plate" then
   elseif cursor_stack.name == "copper-plate" then
+    global.target_position = nil
+    global.target_entity = nil
+    Worm._destroy_target_rendering()
   elseif cursor_stack.name == "steel-plate" then
     -- stop all worms
     for _, worm in pairs(global.worms) do
@@ -506,20 +534,54 @@ function Worm._destroy_range(worm)
   end
 end
 
+---@param surface LuaSurface
+function Worm._draw_target_rendering(surface)
+  if global.target_rendering then rendering.destroy(global.target_rendering) end
+  if global.target_entity then
+    global.target_rendering = rendering.draw_circle{
+      color = {1,0,0},
+      radius = 2,
+      width = 3,
+      filled = false,
+      target = global.target_entity,
+      surface = surface,
+    }
+  elseif global.target_position then
+    global.target_rendering = rendering.draw_circle{
+      color = {1,0,0},
+      radius = 2,
+      width = 3,
+      filled = false,
+      target = global.target_position,
+      surface = surface,
+    }
+  end
+end
+
+function Worm._destroy_target_rendering()
+  if global.target_rendering then
+    rendering.destroy(global.target_rendering)
+    global.target_rendering = nil
+  end
+end
+
 script.on_event(defines.events.on_runtime_mod_setting_changed, function(event)
   if event.setting ~= "debug" then return end
-  debug_flag = settings.global["debug"].value
+  debug_flag = settings.global["debug-graphics"].value
   if debug_flag then
     for _, worm in pairs(global.worms) do
       Worm.update_rendering(worm)
       Worm._draw_range(worm)
     end
+    local player = game.get_player(event.player_index)
+    if player then Worm._draw_target_rendering(player.surface) end
   else
     for _, worm in pairs(global.worms) do
       Worm._destroy_direct_rendering(worm)
       Worm._destroy_path_rendering(worm)
       Worm._destroy_range(worm)
     end
+    Worm._destroy_target_rendering()
   end
 end)
 
@@ -527,13 +589,13 @@ end)
 --- Set target position, with pathfinding request if necessary.
 ---@param worm Worm
 ---@param target_position MapPosition
----@param radius number
+---@param radius? number
 function Worm.set_target_position(worm, target_position, radius)
   -- If nearby, skip pathfinding request and just go directly there
   Worm.set_direct_position(worm, target_position)  -- start moving first
   if Util.dist(worm.head.position, target_position) > 3 * WormStats[worm.size].turn_radius then
     worm.target_path.retries = 1
-    Worm.request_path(worm, target_position, radius)
+    Worm.request_path(worm, target_position, radius or 1)
   end
 end
 
@@ -755,7 +817,7 @@ function Worm.on_entity_damaged(event)
   if not cid then return end
   -- game.print("dmg src: "..event.cause.name..":"..event.cause.unit_number.."="..event.final_damage_amount)
   worm.accumulated_damage[cid] = (worm.accumulated_damage[cid] or 0) + event.final_damage_amount
-  if worm.accumulated_damage[cid] > WormStats[worm.size].max_health * 0.2 then
+  if worm.accumulated_damage[cid] > WormStats[worm.size].max_health * 0.1 then
     Worm.set_target_entity(worm, event.cause)
     worm.accumulated_damage = {}  -- reset accumulated damage
   end
@@ -781,8 +843,12 @@ function Worm.update_head(worm)
 
   -- idle worms can be stopped, but all other worms burrow if stopped/stuck
   if worm.mode ~= "idle" and worm.head.speed < 0.25 * WormStats[worm.size].target_speed then
-    Worm.burrow(worm)
-    return
+    if not worm.stop_tick then worm.stop_tick = game.tick end
+    if (game.tick - worm.stop_tick) > 1.2 * 60 then  -- worms stopped for more than 1.2s burrow
+      Worm.burrow(worm)
+      return
+    end
+    -- Destroy cliffs
     -- local target_position = {
     --   x = worm.head.position.x + WormStats[worm.size].collision_box[2][2] * math.sin(2*math.pi*worm.head.orientation),
     --   y = worm.head.position.y - WormStats[worm.size].collision_box[2][2] * math.cos(2*math.pi*worm.head.orientation)
@@ -809,6 +875,8 @@ function Worm.update_head(worm)
     --   Worm.burrow(worm)
     --   return
     -- end
+  else
+    worm.stop_tick = nil
   end
   if worm.mode == "idle" then
     worm.head.riding_state = {
@@ -928,7 +996,7 @@ function Worm.update_segments(tickdata)
   for _, worm in pairs(global.worms) do
     for _, segment in pairs(worm.segments) do
       -- follow the previous segment
-      local ratio = Util.dist(segment.entity.position, segment.before.position) / segment.separation
+      local ratio = Util.dist(segment.entity.position, segment.before.position) / WormStats[worm.size].segment_sep
       ratio = math.max(0.5, math.min(1.5, ratio))  -- prevent explosion
       segment.entity.speed = ratio * worm.head.speed
       segment.entity.orientation = Util.vector_to_orientation(segment.entity.position, segment.before.position)
