@@ -566,7 +566,7 @@ function Worm._destroy_target_rendering()
 end
 
 script.on_event(defines.events.on_runtime_mod_setting_changed, function(event)
-  if event.setting ~= "debug" then return end
+  if event.setting ~= "debug-graphics" then return end
   debug_flag = settings.global["debug-graphics"].value
   if debug_flag then
     for _, worm in pairs(global.worms) do
